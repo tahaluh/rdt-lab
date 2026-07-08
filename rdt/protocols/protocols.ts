@@ -4,7 +4,7 @@ import { eventBus } from "../../server/websocket";
 import { fileHash } from "../checksum";
 import { hashFilePath, readInputFile } from "../fileUtils";
 import type { Protocol, RunConfig, RunRecord } from "../events";
-import { makePacket, type RdtPacket } from "../packet";
+import { makePacket, type RdtAck, type RdtPacket } from "../packet";
 import { RdtUdpClient } from "../udpClient";
 import { RdtUdpServer } from "../udpServer";
 import { artificialDelay, sleep } from "../unreliableChannel";
@@ -23,6 +23,8 @@ const protocolNames: Record<Protocol, string> = {
   GO_BACK_N: "Go-Back-N",
   SELECTIVE_REPEAT: "Selective Repeat"
 };
+
+const UDP_FAST_SEND_BURST_SIZE = 24;
 
 export async function startTransportRun(config: RunConfig): Promise<RunRecord> {
   const runId = crypto.randomUUID();
@@ -85,6 +87,7 @@ async function executeRun(runId: string, config: RunConfig, input: Buffer, origi
     if (config.protocol === "STOP_AND_WAIT") await executeStopAndWait(runId, config, packets, client, serverPort, signal);
     if (config.protocol === "GO_BACK_N") await executeGoBackN(runId, config, packets, client, serverPort, signal);
     if (config.protocol === "SELECTIVE_REPEAT") await executeSelectiveRepeat(runId, config, packets, client, serverPort, signal);
+    if (config.protocol !== "UDP") await server.waitForPacketWrites(packets.length, signal);
 
     const receivedHash = await hashFilePath(server.getOutputPath());
     eventBus.emitRdt({
@@ -162,30 +165,35 @@ async function sendPacket(runId: string, config: RunConfig, packet: RdtPacket, c
 async function executeUdp(runId: string, config: RunConfig, packets: RdtPacket[], client: RdtUdpClient, serverPort: number, signal: AbortSignal): Promise<void> {
   const sendTimes = new Map<number, number>();
   const sendPaceMs = config.demoMode ? Math.min(20, Math.max(2, Math.floor(artificialDelay(config) / 50))) : 0;
-  for (const packet of packets) {
+  for (const [index, packet] of packets.entries()) {
     if (signal.aborted) throw new Error("Transmissao parada pelo usuario");
     sendTimes.set(packet.packetId, await sendPacket(runId, config, packet, client, serverPort, 1));
     if (sendPaceMs > 0) await sleep(sendPaceMs);
+    if (sendPaceMs === 0 && (index + 1) % UDP_FAST_SEND_BURST_SIZE === 0) await sleep(0);
   }
   await resolveUdpPackets(runId, config, packets, sendTimes, signal);
 }
 
 async function resolveUdpPackets(runId: string, config: RunConfig, packets: RdtPacket[], sendTimes: Map<number, number>, signal: AbortSignal): Promise<void> {
-  const terminalEvents = new Set(["PACKET_LOST", "PACKET_CORRUPTED", "PACKET_RECEIVED", "PACKET_WRITTEN"]);
+  const terminalEvents = new Set(["PACKET_LOST", "PACKET_CORRUPTED", "PACKET_WRITTEN"]);
+  const observedEvents = new Set(["PACKET_DELAYED", "PACKET_RECEIVED"]);
   const resolved = new Set<number>();
+  const observed = new Set<number>();
   const timedOut = new Set<number>();
-  const deliveryTimeoutMs = Math.min(15000, Math.max(1000, artificialDelay(config) * 3 + 1500));
+  const deliveryTimeoutMs = Math.min(30000, Math.max(3000, artificialDelay(config) * 6 + 3000));
 
   while (resolved.size < packets.length) {
     if (signal.aborted) throw new Error("Transmissao parada pelo usuario");
     for (const event of listEvents(runId)) {
-      if (event.packetId == null || !terminalEvents.has(event.type)) continue;
-      resolved.add(event.packetId);
+      if (event.packetId == null) continue;
+      if (observedEvents.has(event.type)) observed.add(event.packetId);
+      if (terminalEvents.has(event.type)) resolved.add(event.packetId);
     }
 
     const now = Date.now();
     for (const packet of packets) {
       if (resolved.has(packet.packetId) || timedOut.has(packet.packetId)) continue;
+      if (observed.has(packet.packetId)) continue;
       const sentAt = sendTimes.get(packet.packetId) ?? now;
       if (now - sentAt < deliveryTimeoutMs) continue;
       timedOut.add(packet.packetId);
@@ -322,40 +330,67 @@ async function executeSelectiveRepeat(runId: string, config: RunConfig, packets:
   const windowSize = Math.max(1, config.windowSize);
   let nextPacketId = 0;
 
-  while (acked.size < packets.length) {
-    if (signal.aborted) throw new Error("Transmissao parada pelo usuario");
-
+  const fillWindow = async () => {
     while (nextPacketId < packets.length && inFlight.size < windowSize) {
       await sendSelectiveRepeatPacket(runId, config, packets[nextPacketId], client, serverPort, attempts, sendTimes, inFlight, false, windowSize);
       nextPacketId += 1;
     }
+  };
 
-    for (const [packetId, lastSentAt] of Array.from(inFlight)) {
+  const applyAck = (ack: RdtAck): boolean => {
+    if (ack.packetId < 0 || ack.packetId >= packets.length) return false;
+    const packet = packets[ack.packetId];
+    const wasNewAck = !acked.has(ack.packetId);
+    acked.add(ack.packetId);
+    inFlight.delete(ack.packetId);
+    if (wasNewAck) {
+      eventBus.emitRdt({
+        runId,
+        protocol: config.protocol,
+        packetId: ack.packetId,
+        seq: packet.seq,
+        type: "ACK_RECEIVED",
+        message: `[CLIENT] Selective ACK received for packet ${ack.packetId}`,
+        metadata: { selectiveAck: true, rttMs: Date.now() - (sendTimes.get(ack.packetId) ?? Date.now()), inFlight: inFlight.size, windowSize }
+      });
+    }
+    return wasNewAck;
+  };
+
+  const drainAcks = async () => {
+    let acceptedAny = false;
+    for (const ack of client.drainPendingAcks()) {
+      acceptedAny = applyAck(ack) || acceptedAny;
+    }
+    if (acceptedAny) await fillWindow();
+  };
+
+  while (acked.size < packets.length) {
+    if (signal.aborted) throw new Error("Transmissao parada pelo usuario");
+
+    await fillWindow();
+    await drainAcks();
+
+    for (const [packetId] of Array.from(inFlight)) {
+      await drainAcks();
       if (acked.has(packetId)) {
         inFlight.delete(packetId);
         continue;
       }
+      const lastSentAt = inFlight.get(packetId);
+      if (lastSentAt == null) continue;
       if (Date.now() - lastSentAt < config.timeoutMs) continue;
       await sendSelectiveRepeatPacket(runId, config, packets[packetId], client, serverPort, attempts, sendTimes, inFlight, true, windowSize);
     }
 
+    await drainAcks();
+    if (acked.size >= packets.length) break;
+
     const ack = await client.waitForAnyAck(selectiveRepeatAckWaitMs(config, inFlight), signal);
-    if (ack && ack.packetId < packets.length) {
-      const packet = packets[ack.packetId];
-      const wasNewAck = !acked.has(ack.packetId);
-      acked.add(ack.packetId);
-      inFlight.delete(ack.packetId);
-      if (wasNewAck) {
-        eventBus.emitRdt({
-          runId,
-          protocol: config.protocol,
-          packetId: ack.packetId,
-          seq: packet.seq,
-          type: "ACK_RECEIVED",
-          message: `[CLIENT] Selective ACK received for packet ${ack.packetId}`,
-          metadata: { selectiveAck: true, rttMs: Date.now() - (sendTimes.get(ack.packetId) ?? Date.now()), inFlight: inFlight.size, windowSize }
-        });
-      }
+    if (signal.aborted) throw new Error("Transmissao parada pelo usuario");
+    if (ack) {
+      applyAck(ack);
+      await fillWindow();
     }
   }
 }

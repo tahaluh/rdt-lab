@@ -47,6 +47,15 @@ export class RdtUdpServer {
     return this.outputPath;
   }
 
+  async waitForPacketWrites(totalPackets: number, signal?: AbortSignal): Promise<void> {
+    while (this.receivedPacketIds.size < totalPackets) {
+      if (signal?.aborted) throw new Error("Transmissao parada pelo usuario");
+      await this.stateQueue;
+      if (this.receivedPacketIds.size >= totalPackets) return;
+      await sleep(10);
+    }
+  }
+
   private async handleMessage(message: Buffer, rinfo: RemoteInfo): Promise<void> {
     if (this.closed) return;
     const decoded = decodeMessage(message);
@@ -118,7 +127,9 @@ export class RdtUdpServer {
     });
 
     if (this.config.protocol === "UDP") {
-      await this.writePacket(packet);
+      await this.enqueueStateUpdate(async () => {
+        await this.writePacket(packet);
+      });
       return;
     }
 
@@ -197,7 +208,7 @@ export class RdtUdpServer {
         type: "DUPLICATE_RECEIVED",
         message: `[SERVER] Packet ${packet.packetId} duplicate; ACK resent`
       });
-      await this.sendAck(packet, rinfo);
+      this.sendAckSoon(packet, rinfo);
       return;
     }
 
@@ -210,12 +221,12 @@ export class RdtUdpServer {
         type: "DUPLICATE_RECEIVED",
         message: `[SERVER] Packet ${packet.packetId} already buffered; ACK resent`
       });
-      await this.sendAck(packet, rinfo);
+      this.sendAckSoon(packet, rinfo);
       return;
     }
 
     this.bufferedPackets.set(packet.packetId, packet);
-    await this.sendAck(packet, rinfo);
+    this.sendAckSoon(packet, rinfo);
     await this.flushSelectiveRepeatBuffer();
   }
 
@@ -276,6 +287,21 @@ export class RdtUdpServer {
       seq: packet.seq,
       type: "ACK_SENT",
       message: `[SERVER] ACK ${packet.seq} sent for packet ${packet.packetId}`
+    });
+  }
+
+  private sendAckSoon(packet: RdtPacket, rinfo: RemoteInfo): void {
+    void this.sendAck(packet, rinfo).catch((error) => {
+      if (this.closed) return;
+      eventBus.emitRdt({
+        runId: this.runId,
+        protocol: this.config.protocol,
+        packetId: packet.packetId,
+        seq: packet.seq,
+        type: "RUN_FAILED",
+        message: `[SERVER] ACK send failed: ${error instanceof Error ? error.message : String(error)}`,
+        metadata: { error: error instanceof Error ? error.message : String(error) }
+      });
     });
   }
 }

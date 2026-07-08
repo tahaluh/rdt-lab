@@ -10,8 +10,9 @@ type SocketMessage =
   | { type: "run-started"; runId: string }
   | { type: "run-finished"; runId: string };
 
-const EVENT_BATCH_INTERVAL_MS = 25;
+const EVENT_BATCH_INTERVAL_MS = 40;
 const EVENT_BATCH_MAX_SIZE = 80;
+const CREATION_BATCH_MAX_SIZE = 1000;
 
 class RdtEventBus extends EventEmitter {
   emitRdt(event: Omit<RdtEvent, "timestamp" | "protocol"> & { timestamp?: number; protocol?: Protocol }): RdtEvent {
@@ -66,8 +67,12 @@ export function attachWebSocket(server: HttpServer): WebSocketServer {
   };
 
   eventBus.on("event", (event: RdtEvent) => {
+    if (event.type !== "PACKET_CREATED" && eventQueue.some((queuedEvent) => queuedEvent.type === "PACKET_CREATED")) {
+      flushEvents();
+    }
     eventQueue.push(event);
-    if (eventQueue.length >= EVENT_BATCH_MAX_SIZE) {
+    const maxBatchSize = event.type === "PACKET_CREATED" ? CREATION_BATCH_MAX_SIZE : EVENT_BATCH_MAX_SIZE;
+    if (eventQueue.length >= maxBatchSize) {
       flushEvents();
       return;
     }

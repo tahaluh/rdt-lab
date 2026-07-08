@@ -40,6 +40,12 @@ export class RdtUdpClient {
     return this.waitForAckMatching(() => true, timeoutMs, signal);
   }
 
+  drainPendingAcks(): RdtAck[] {
+    const acks = this.pendingAcks;
+    this.pendingAcks = [];
+    return acks;
+  }
+
   waitForCumulativeAck(minPacketId: number, timeoutMs: number, signal?: AbortSignal): Promise<RdtAck | null> {
     return new Promise((resolve) => {
       if (signal?.aborted) {
