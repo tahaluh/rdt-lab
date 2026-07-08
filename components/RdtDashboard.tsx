@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ReactNode } from "react";
+import type { CSSProperties, ReactNode } from "react";
 import { Pause, Play, RotateCcw, Save, Square, UploadCloud } from "lucide-react";
 import type { PacketState, RdtEvent, RunConfig, RunRecord } from "@/rdt/events";
 
@@ -103,6 +103,22 @@ function useTicker(active: boolean): number {
     return () => window.clearInterval(timer);
   }, [active]);
   return now;
+}
+
+function usePacketGridColumns(): number {
+  const [columns, setColumns] = useState(28);
+  useEffect(() => {
+    const update = () => {
+      if (window.innerWidth <= 520) setColumns(12);
+      else if (window.innerWidth <= 760) setColumns(16);
+      else if (window.innerWidth <= 1180) setColumns(20);
+      else setColumns(28);
+    };
+    update();
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
+  }, []);
+  return columns;
 }
 
 async function readJson<T>(response: Response): Promise<T | null> {
@@ -775,7 +791,7 @@ function MetricCard({ title, lines, hero, progress }: { title: string; lines: st
 }
 
 function PacketGrid({ packets, selectedPacketId, setSelectedPacketId }: { packets: Array<{ packetId: number; state: PacketState; events: RdtEvent[] }>; selectedPacketId: number; setSelectedPacketId: (id: number) => void }) {
-  const columns = 28;
+  const columns = usePacketGridColumns();
   const rowsPerPage = 3;
   const pageSize = columns * rowsPerPage;
   const [pageIndex, setPageIndex] = useState(0);
@@ -802,13 +818,13 @@ function PacketGrid({ packets, selectedPacketId, setSelectedPacketId }: { packet
           <button type="button" onClick={() => setPageIndex((current) => Math.min(pageCount - 1, current + 1))} disabled={pageIndex >= pageCount - 1}>Próxima</button>
         </div>
       </div>
-      <div className="packet-grid">
+      <div className="packet-grid" style={{ "--packet-columns": columns } as CSSProperties}>
         {fixedRows.map((packet) => <PacketCell key={packet.packetId} packet={packet} selected={packet.packetId === selectedPacketId} onClick={setSelectedPacketId} />)}
       </div>
       {showCurrentRow ? (
         <>
           <div className="packet-current-label">Linha atual: pacotes {currentStart}-{Math.min(packets.length - 1, currentStart + columns - 1)}</div>
-          <div className="packet-grid current-row">
+          <div className="packet-grid current-row" style={{ "--packet-columns": columns } as CSSProperties}>
             {currentRow.map((packet) => <PacketCell key={`current-${packet.packetId}`} packet={packet} selected={packet.packetId === selectedPacketId} onClick={setSelectedPacketId} />)}
           </div>
         </>

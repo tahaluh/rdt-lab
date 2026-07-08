@@ -560,7 +560,7 @@ button:disabled {
 .packet-grid {
   align-content: start;
   display: grid;
-  grid-template-columns: repeat(28, minmax(0, 1fr));
+  grid-template-columns: repeat(var(--packet-columns, 28), minmax(0, 1fr));
   gap: 2px;
   overflow: visible;
   padding: 2px;
@@ -989,5 +989,38 @@ button:disabled {
 
   .center-column {
     grid-template-rows: auto auto auto;
+  }
+
+  .packet-cell {
+    font-size: 10px;
+  }
+}
+
+@media (max-width: 760px) {
+  .packet-pagebar,
+  .packet-nav {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .packet-pagebar > div,
+  .packet-nav form {
+    width: 100%;
+  }
+
+  .packet-pagebar button,
+  .packet-nav button {
+    flex: 1;
+  }
+}
+
+@media (max-width: 520px) {
+  .packet-grid {
+    gap: 3px;
+  }
+
+  .packet-cell {
+    border-radius: 5px;
+    font-size: 9px;
   }
 }

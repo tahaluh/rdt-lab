@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getRun, updateRunFinished } from "@/server/db";
-import { stopRun } from "@/rdt/protocols/stopAndWait";
+import { stopRun } from "@/rdt/protocols/protocols";
 
 export async function POST(_: Request, { params }: { params: { runId: string } }) {
   const run = getRun(params.runId);

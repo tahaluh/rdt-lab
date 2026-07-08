@@ -1,6 +1,7 @@
 node_modules
 .next
 dist
+data/
 data/rdt.sqlite
 data/output/*
 !data/output/.gitkeep

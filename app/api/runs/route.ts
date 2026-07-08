@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { listRuns } from "@/server/db";
-import { startTransportRun } from "@/rdt/protocols/stopAndWait";
+import { startTransportRun } from "@/rdt/protocols/protocols";
 import type { Protocol, RunConfig } from "@/rdt/events";
 
 const payloadSizes = new Set([256, 512, 1024, 1400, 4096]);
