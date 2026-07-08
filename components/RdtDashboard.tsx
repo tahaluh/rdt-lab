@@ -2,12 +2,12 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
-import { Pause, Play, RotateCcw, Save, SkipBack, SkipForward, Square, Trash2, UploadCloud, X } from "lucide-react";
+import { Pause, Play, RotateCcw, Save, SkipBack, SkipForward, Square, Trash2, X } from "lucide-react";
 import type { PacketState, RdtEvent, RunConfig, RunRecord } from "@/rdt/events";
 
 type FileItem = { name: string; size: number };
 type SocketMessage = { type: "event"; event: RdtEvent } | { type: "events"; events: RdtEvent[] } | { type: "run-started"; runId: string } | { type: "run-finished"; runId: string };
-type SourceMode = "upload" | "text" | "random" | "packets";
+type SourceMode = "file" | "text" | "random" | "packets";
 type LabProtocol = "UDP" | "STOP_AND_WAIT" | "GO_BACK_N" | "SELECTIVE_REPEAT";
 type WindowMode = "preset" | "custom";
 type EventOrder = { byId: Map<number, number>; byRef: Map<RdtEvent, number> };
@@ -185,7 +185,6 @@ export function RdtDashboard({ initialRunId }: { initialRunId?: string }) {
 
   const [sourceMode, setSourceMode] = useState<SourceMode>("random");
   const [selectedFile, setSelectedFile] = useState("");
-  const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [sizePreset, setSizePreset] = useState("100kb");
   const [customKb, setCustomKb] = useState(256);
   const [packetCount, setPacketCount] = useState(128);
@@ -358,8 +357,8 @@ export function RdtDashboard({ initialRunId }: { initialRunId?: string }) {
   const logEvents = currentEvents.filter((event) => event.timestamp > clearedLogAt);
   const selectedFileSize = files.find((file) => file.name === selectedFile)?.size;
   const effectivePacketCount = Math.min(50000, Math.max(1, Number.isFinite(packetCount) ? Math.floor(packetCount) : 1));
-  const configuredBytes = sourceMode === "upload"
-    ? uploadFile?.size ?? selectedFileSize ?? 1
+  const configuredBytes = sourceMode === "file"
+    ? selectedFileSize ?? 1
     : sourceMode === "packets"
       ? effectivePacketCount * payloadSize
       : bytesForSize(sizePreset, customKb);
@@ -422,16 +421,7 @@ export function RdtDashboard({ initialRunId }: { initialRunId?: string }) {
   const etaMs = stats.progress > 0 && stats.progress < 100 ? stats.elapsedMs * ((100 - stats.progress) / stats.progress) : 0;
 
   async function resolveFileName(): Promise<string> {
-    if (sourceMode === "upload") {
-      if (uploadFile) {
-        const form = new FormData();
-        form.set("file", uploadFile);
-        const response = await fetch("/api/files/upload", { method: "POST", body: form });
-        const data = await readJson<{ file: FileItem; error?: string }>(response);
-        if (!response.ok || !data?.file) throw new Error(data?.error ?? "Falha ao enviar arquivo");
-        await loadFiles();
-        return data.file.name;
-      }
+    if (sourceMode === "file") {
       return selectedFile || files[0]?.name || "";
     }
     const bytes = sourceMode === "packets" ? effectivePacketCount * payloadSize : bytesForSize(sizePreset, customKb);
@@ -711,29 +701,22 @@ export function RdtDashboard({ initialRunId }: { initialRunId?: string }) {
         <Card title="Configuração da transmissão">
           <Field label="Fonte dos dados">
             <select value={sourceMode} onChange={(event) => setSourceMode(event.target.value as SourceMode)}>
-              <option value="upload">Upload de arquivo</option>
+              <option value="file">Escolher arquivo</option>
               <option value="text">Gerar texto</option>
               <option value="random">Gerar bytes aleatórios</option>
               <option value="packets">Gerar N pacotes</option>
             </select>
           </Field>
-          {sourceMode === "upload" ? (
-            <>
-              <label className="upload-control">
-                <UploadCloud size={16} />
-                <span>{uploadFile?.name || "Escolher arquivo"}</span>
-                <input type="file" onChange={(event) => setUploadFile(event.currentTarget.files?.[0] ?? null)} />
-              </label>
-              <Field label="Arquivo disponível">
-                <select value={selectedFile} onChange={(event) => setSelectedFile(event.target.value)}>
-                  {files.map((file) => (
-                    <option key={file.name} value={file.name}>{file.name}</option>
-                  ))}
-                </select>
-              </Field>
-            </>
+          {sourceMode === "file" ? (
+            <Field label="Arquivo">
+              <select value={selectedFile} onChange={(event) => setSelectedFile(event.target.value)}>
+                {files.map((file) => (
+                  <option key={file.name} value={file.name}>{file.name}</option>
+                ))}
+              </select>
+            </Field>
           ) : null}
-          {sourceMode !== "upload" && sourceMode !== "packets" ? (
+          {sourceMode !== "file" && sourceMode !== "packets" ? (
             <>
               <Field label="Tamanho">
                 <select value={sizePreset} onChange={(event) => setSizePreset(event.target.value)}>

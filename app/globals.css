@@ -232,28 +232,6 @@ button:disabled {
   border-color: var(--cyan);
 }
 
-.upload-control {
-  min-height: 30px;
-  border: 1px dashed var(--line);
-  border-radius: 7px;
-  color: var(--cyan);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  font-size: 12px;
-  font-weight: 800;
-  position: relative;
-  overflow: hidden;
-}
-
-.upload-control input {
-  position: absolute;
-  inset: 0;
-  opacity: 0;
-  cursor: pointer;
-}
-
 .estimate-box {
   border: 1px solid var(--line);
   border-radius: 7px;
