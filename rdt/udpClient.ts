@@ -32,12 +32,50 @@ export class RdtUdpClient {
     });
   }
 
-  waitForAck(packetId: number, seq: 0 | 1, timeoutMs: number, signal?: AbortSignal): Promise<RdtAck | null> {
+  waitForAck(packetId: number, seq: number, timeoutMs: number, signal?: AbortSignal): Promise<RdtAck | null> {
     return this.waitForAckMatching((ack) => ack.packetId === packetId && ack.seq === seq, timeoutMs, signal);
   }
 
   waitForAnyAck(timeoutMs: number, signal?: AbortSignal): Promise<RdtAck | null> {
     return this.waitForAckMatching(() => true, timeoutMs, signal);
+  }
+
+  waitForCumulativeAck(minPacketId: number, timeoutMs: number, signal?: AbortSignal): Promise<RdtAck | null> {
+    return new Promise((resolve) => {
+      if (signal?.aborted) {
+        resolve(null);
+        return;
+      }
+
+      const pendingAck = this.takeBestPendingCumulativeAck(minPacketId);
+      if (pendingAck) {
+        resolve(pendingAck);
+        return;
+      }
+
+      let bestAck: RdtAck | null = null;
+      let settleTimer: ReturnType<typeof setTimeout> | null = null;
+
+      const finish = (ack: RdtAck | null) => {
+        clearTimeout(timeoutTimer);
+        if (settleTimer) clearTimeout(settleTimer);
+        signal?.removeEventListener("abort", onAbort);
+        this.ackWaiters.delete(onAck);
+        resolve(ack);
+      };
+
+      const onAck = (ack: RdtAck) => {
+        if (ack.packetId < minPacketId) return true;
+        if (!bestAck || ack.packetId > bestAck.packetId) bestAck = ack;
+        settleTimer ??= setTimeout(() => finish(bestAck), 12);
+        return true;
+      };
+
+      const onAbort = () => finish(null);
+      const timeoutTimer = setTimeout(() => finish(bestAck), timeoutMs);
+      signal?.addEventListener("abort", onAbort, { once: true });
+      this.ackWaiters.add(onAck);
+    });
   }
 
   private waitForAckMatching(matches: (ack: RdtAck) => boolean, timeoutMs: number, signal?: AbortSignal): Promise<RdtAck | null> {
@@ -73,5 +111,24 @@ export class RdtUdpClient {
       signal?.addEventListener("abort", onAbort, { once: true });
       this.ackWaiters.add(onAck);
     });
+  }
+
+  private takeBestPendingCumulativeAck(minPacketId: number): RdtAck | null {
+    let bestAck: RdtAck | null = null;
+    const retained: RdtAck[] = [];
+
+    for (const ack of this.pendingAcks) {
+      if (ack.packetId < minPacketId) continue;
+      if (!bestAck || ack.packetId > bestAck.packetId) bestAck = ack;
+    }
+
+    for (const ack of this.pendingAcks) {
+      if (ack.packetId < minPacketId) continue;
+      if (bestAck && ack.packetId <= bestAck.packetId) continue;
+      retained.push(ack);
+    }
+
+    this.pendingAcks = retained;
+    return bestAck;
   }
 }

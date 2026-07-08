@@ -10,6 +10,7 @@ type SocketMessage = { type: "event"; event: RdtEvent } | { type: "run-started";
 type SourceMode = "upload" | "text" | "random" | "packets";
 type LabProtocol = "UDP" | "STOP_AND_WAIT" | "GO_BACK_N" | "SELECTIVE_REPEAT";
 type WindowMode = "preset" | "custom";
+type EventOrder = { byId: Map<number, number>; byRef: Map<RdtEvent, number> };
 
 const payloadOptions = [256, 512, 1024, 1400, 4096];
 const windowOptions = [1, 4, 8, 16, 32, 64];
@@ -34,9 +35,9 @@ const stateLabel: Record<PacketState, string> = {
 };
 
 function stateFromEvents(events: RdtEvent[]): PacketState {
+  if (events.some((event) => event.type === "DUPLICATE_RECEIVED")) return "duplicated";
   if (events.some((event) => event.type === "ACK_RECEIVED")) return "acknowledged";
   if (events.some((event) => event.type === "PACKET_WRITTEN")) return "received";
-  if (events.some((event) => event.type === "DUPLICATE_RECEIVED")) return "duplicated";
   if (events.some((event) => event.type === "PACKET_RECEIVED")) return "received";
   if (events.some((event) => event.type === "PACKET_CORRUPTED")) return "corrupted";
   if (events.some((event) => event.type === "PACKET_LOST" || event.type === "ACK_LOST")) return "lost";
@@ -76,8 +77,9 @@ function formatLogDate(timestamp?: number): string {
   });
 }
 
-function logNumber(event: RdtEvent, fallbackIndex: number): string {
-  return `#${event.id ?? fallbackIndex + 1}`;
+function logNumber(event: RdtEvent, fallbackIndex: number, eventOrder?: EventOrder): string {
+  const runIndex = event.id != null ? eventOrder?.byId.get(event.id) : eventOrder?.byRef.get(event);
+  return `#${runIndex ?? fallbackIndex + 1}`;
 }
 
 function formatElapsed(ms: number): string {
@@ -120,9 +122,12 @@ export function RdtDashboard({ initialRunId }: { initialRunId?: string }) {
   const [selectedPacketId, setSelectedPacketId] = useState(0);
   const [packetJump, setPacketJump] = useState("0");
   const [paused, setPaused] = useState(false);
+  const [pausedAt, setPausedAt] = useState<number | null>(null);
   const [visibleEvents, setVisibleEvents] = useState<RdtEvent[]>([]);
   const [clearedLogAt, setClearedLogAt] = useState(0);
   const [saveStatus, setSaveStatus] = useState("");
+  const [starting, setStarting] = useState(false);
+  const [stopping, setStopping] = useState(false);
 
   const [sourceMode, setSourceMode] = useState<SourceMode>("random");
   const [selectedFile, setSelectedFile] = useState("");
@@ -145,7 +150,9 @@ export function RdtDashboard({ initialRunId }: { initialRunId?: string }) {
   const [windowSize, setWindowSize] = useState(4);
   const [customWindowSize, setCustomWindowSize] = useState(12);
   const currentRunIdRef = useRef<string | null>(initialRunId ?? null);
-  const now = useTicker(run?.status === "running");
+  const now = useTicker(run?.status === "running" && !paused);
+  const statsNow = paused && pausedAt ? pausedAt : now;
+  const isRunning = run?.status === "running";
 
   const loadFiles = useCallback(async () => {
     const response = await fetch("/api/files", { cache: "no-store" });
@@ -199,6 +206,16 @@ export function RdtDashboard({ initialRunId }: { initialRunId?: string }) {
   }, [selectedPacketId]);
 
   const currentEvents = paused ? visibleEvents : events;
+  const eventOrder = useMemo<EventOrder>(() => {
+    const byId = new Map<number, number>();
+    const byRef = new Map<RdtEvent, number>();
+    currentEvents.forEach((event, index) => {
+      const runIndex = index + 1;
+      if (event.id != null) byId.set(event.id, runIndex);
+      byRef.set(event, runIndex);
+    });
+    return { byId, byRef };
+  }, [currentEvents]);
   const logEvents = currentEvents.filter((event) => event.timestamp > clearedLogAt);
   const selectedFileSize = files.find((file) => file.name === selectedFile)?.size;
   const effectivePacketCount = Math.min(50000, Math.max(1, Number.isFinite(packetCount) ? Math.floor(packetCount) : 1));
@@ -239,7 +256,7 @@ export function RdtDashboard({ initialRunId }: { initialRunId?: string }) {
     const rtts = currentEvents
       .map((event) => (typeof event.metadata?.rttMs === "number" ? event.metadata.rttMs : null))
       .filter((value): value is number => value != null);
-    const elapsedMs = run ? (run.finishedAt ?? now) - run.startedAt : 0;
+    const elapsedMs = run ? (run.finishedAt ?? statsNow) - run.startedAt : 0;
     const usefulThroughput = run && elapsedMs > 0 ? Math.min(run.fileSize, confirmed * run.payloadSize) / (elapsedMs / 1000) : 0;
     const grossThroughput = run && elapsedMs > 0 ? packetsSent * run.payloadSize / (elapsedMs / 1000) : 0;
     return {
@@ -258,11 +275,11 @@ export function RdtDashboard({ initialRunId }: { initialRunId?: string }) {
       efficiency: packetsSent > 0 ? (confirmed / packetsSent) * 100 : 0,
       progress: runTotalPackets > 0 ? Math.min(100, (confirmed / runTotalPackets) * 100) : 0
     };
-  }, [activeProtocol, currentEvents, now, run, runTotalPackets]);
+  }, [activeProtocol, currentEvents, run, runTotalPackets, statsNow]);
 
   const selectedPacket = packets[selectedPacketId] ?? packets[0];
   const latestSeq = [...currentEvents].reverse().find((event) => event.seq != null)?.seq;
-  const seqCurrent = latestSeq ?? ((stats.confirmed % 2) as 0 | 1);
+  const seqCurrent = latestSeq ?? (activeProtocol === "STOP_AND_WAIT" ? stats.confirmed % 2 : stats.confirmed);
   const etaMs = stats.progress > 0 && stats.progress < 100 ? stats.elapsedMs * ((100 - stats.progress) / stats.progress) : 0;
 
   async function resolveFileName(): Promise<string> {
@@ -299,15 +316,28 @@ export function RdtDashboard({ initialRunId }: { initialRunId?: string }) {
   }
 
   async function startRun() {
+    if (starting || stopping || isRunning) return;
+    setStarting(true);
+    currentRunIdRef.current = null;
+    setRun(null);
+    setPaused(false);
+    setPausedAt(null);
+    setEvents([]);
+    setVisibleEvents([]);
+    setClearedLogAt(0);
+    setSaveStatus("");
+    setSelectedPacketId(0);
     let fileName = "";
     try {
       fileName = await resolveFileName();
     } catch (error) {
       setSaveStatus(`Erro ao preparar arquivo: ${error instanceof Error ? error.message : String(error)}`);
+      setStarting(false);
       return;
     }
     if (!fileName) {
       setSaveStatus("Escolha ou gere um arquivo antes de iniciar");
+      setStarting(false);
       return;
     }
     const config: RunConfig = {
@@ -322,37 +352,59 @@ export function RdtDashboard({ initialRunId }: { initialRunId?: string }) {
       demoMode: hasReliability ? slowMode : false,
       windowSize: effectiveWindowSize
     };
-    setPaused(false);
-    setEvents([]);
-    setVisibleEvents([]);
-    setClearedLogAt(0);
-    setSaveStatus("");
-    setSelectedPacketId(0);
-    const response = await fetch("/api/runs", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(config)
-    });
-    let data: { run?: RunRecord; error?: string } | null = null;
     try {
-      data = await readJson<{ run?: RunRecord; error?: string }>(response);
+      const response = await fetch("/api/runs", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(config)
+      });
+      const data = await readJson<{ run?: RunRecord; error?: string }>(response);
+      if (!response.ok || !data?.run) {
+        setSaveStatus(`Erro ao iniciar: ${data?.error ?? (response.statusText || "resposta inválida")}`);
+        return;
+      }
+      currentRunIdRef.current = data.run.id;
+      setRun(data.run);
+      window.history.replaceState(null, "", `/runs/${data.run.id}`);
     } catch (error) {
       setSaveStatus(`Erro ao iniciar: ${error instanceof Error ? error.message : String(error)}`);
-      return;
+    } finally {
+      setStarting(false);
     }
-    if (!response.ok || !data?.run) {
-      setSaveStatus(`Erro ao iniciar: ${data?.error ?? (response.statusText || "resposta inválida")}`);
-      return;
-    }
-    currentRunIdRef.current = data.run.id;
-    setRun(data.run);
-    window.history.replaceState(null, "", `/runs/${data.run.id}`);
   }
 
   async function stopRun() {
-    if (!run) return;
-    await fetch(`/api/runs/${run.id}/stop`, { method: "POST" });
-    await loadRun(run.id);
+    if (!run || run.status !== "running" || stopping) return;
+    setStopping(true);
+    setPaused(false);
+    setPausedAt(null);
+    try {
+      await fetch(`/api/runs/${run.id}/stop`, { method: "POST" });
+      await waitForStoppedRun(run.id);
+    } catch (error) {
+      setSaveStatus(`Erro ao parar: ${error instanceof Error ? error.message : String(error)}`);
+      await loadRun(run.id);
+    } finally {
+      setStopping(false);
+    }
+  }
+
+  async function waitForStoppedRun(runId: string): Promise<void> {
+    const deadline = Date.now() + 6000;
+    while (Date.now() < deadline) {
+      await loadRun(runId);
+      const response = await fetch(`/api/runs/${runId}`, { cache: "no-store" });
+      if (response.ok) {
+        const data = (await response.json()) as { run: RunRecord; events: RdtEvent[] };
+        currentRunIdRef.current = data.run.id;
+        setRun(data.run);
+        setEvents(data.events);
+        setVisibleEvents(data.events);
+        if (data.run.status !== "running") return;
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 150));
+    }
+    await loadRun(runId);
   }
 
   async function saveRun() {
@@ -370,9 +422,20 @@ export function RdtDashboard({ initialRunId }: { initialRunId?: string }) {
     setSaveStatus(`Salvo no banco às ${formatClock(data.run.savedAt)}`);
   }
 
-  function clearRound() {
+  async function clearRound() {
+    if (run?.status === "running") {
+      setStopping(true);
+      try {
+        await fetch(`/api/runs/${run.id}/stop`, { method: "POST" });
+        await waitForStoppedRun(run.id);
+      } finally {
+        setStopping(false);
+      }
+    }
     currentRunIdRef.current = null;
     setRun(null);
+    setPaused(false);
+    setPausedAt(null);
     setEvents([]);
     setVisibleEvents([]);
     setClearedLogAt(0);
@@ -500,13 +563,13 @@ export function RdtDashboard({ initialRunId }: { initialRunId?: string }) {
         </Card>
 
         <Card title="Controles da rodada" className="round-controls-card">
-          <button className="primary-btn" onClick={() => void startRun()} type="button">
+          <button className="primary-btn" onClick={() => void startRun()} disabled={starting || stopping || isRunning} type="button">
             <Play size={16} />
-            Iniciar transmissão
+            {starting ? "Iniciando..." : isRunning ? "Transmissão em andamento" : "Iniciar transmissão"}
           </button>
-          <button className="secondary-btn" onClick={clearRound} type="button">
+          <button className="secondary-btn" onClick={() => void clearRound()} disabled={starting || stopping} type="button">
             <RotateCcw size={16} />
-            Limpar / nova rodada
+            {stopping ? "Parando..." : "Limpar / nova rodada"}
           </button>
         </Card>
       </aside>
@@ -554,7 +617,7 @@ export function RdtDashboard({ initialRunId }: { initialRunId?: string }) {
           <ol className="packet-timeline">
             {(selectedPacket?.events ?? []).map((event, index) => (
               <li className={event.type.toLowerCase()} key={event.id ?? `${event.timestamp}-${index}`}>
-                <b>{logNumber(event, index)}</b>
+                <b>{logNumber(event, index, eventOrder)}</b>
                 <time>{formatLogDate(event.timestamp)}</time>
                 <em>{origin(event)}</em>
                 <strong>{event.type.replaceAll("_", " ")}</strong>
@@ -569,16 +632,22 @@ export function RdtDashboard({ initialRunId }: { initialRunId?: string }) {
       <aside className="right-column">
         <Card title="Ações rápidas" className="quick-actions-card">
           <div className="quick-actions">
-            <button onClick={() => {
+            <button disabled={!run} onClick={() => {
               setPaused((value) => {
-                if (!value) setVisibleEvents(events);
-                return !value;
+                const next = !value;
+                if (next) {
+                  setVisibleEvents(events);
+                  setPausedAt(Date.now());
+                } else {
+                  setPausedAt(null);
+                }
+                return next;
               });
             }} type="button">
-              <Pause size={15} /> Pausar
+              <Pause size={15} /> {paused ? "Retomar visão" : "Pausar visão"}
             </button>
-            <button onClick={() => void stopRun()} disabled={run?.status !== "running"} type="button">
-              <Square size={15} /> Parar
+            <button onClick={() => void stopRun()} disabled={!isRunning || stopping} type="button">
+              <Square size={15} /> {stopping ? "Parando..." : "Parar"}
             </button>
             <button onClick={() => void saveRun()} disabled={!run} type="button">
               <Save size={15} /> Salvar rodada
@@ -625,7 +694,7 @@ export function RdtDashboard({ initialRunId }: { initialRunId?: string }) {
           <div className="live-log">
             {logEvents.slice(-120).map((event, index) => (
               <div className={event.type.toLowerCase()} key={event.id ?? `${event.timestamp}-${index}`}>
-                <b>{logNumber(event, index)}</b>
+                <b>{logNumber(event, index, eventOrder)}</b>
                 <time>{formatLogDate(event.timestamp)}</time>
                 <em>{origin(event)}</em>
                 <strong>{event.type.replaceAll("_", " ")}</strong>

@@ -34,7 +34,7 @@ function rowToEvent(row: Record<string, unknown>): RdtEvent {
     timestamp: Number(row.timestamp),
     protocol: row.protocol as Protocol,
     packetId: row.packet_id == null ? undefined : Number(row.packet_id),
-    seq: row.seq == null ? undefined : (Number(row.seq) as 0 | 1),
+    seq: row.seq == null ? undefined : Number(row.seq),
     type: row.type as RdtEvent["type"],
     message: String(row.message),
     metadata: row.metadata_json ? JSON.parse(String(row.metadata_json)) : undefined

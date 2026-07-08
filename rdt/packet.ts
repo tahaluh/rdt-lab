@@ -4,7 +4,7 @@ export type RdtPacket = {
   kind: "DATA";
   runId: string;
   packetId: number;
-  seq: 0 | 1;
+  seq: number;
   checksum: string;
   payload: string;
   isLast: boolean;
@@ -15,11 +15,11 @@ export type RdtAck = {
   kind: "ACK";
   runId: string;
   packetId: number;
-  seq: 0 | 1;
+  seq: number;
   checksum: string;
 };
 
-export function makePacket(runId: string, packetId: number, seq: 0 | 1, payload: Buffer, isLast: boolean): RdtPacket {
+export function makePacket(runId: string, packetId: number, seq: number, payload: Buffer, isLast: boolean): RdtPacket {
   const encoded = payload.toString("base64");
   const timestamp = Date.now();
   return {
@@ -34,7 +34,7 @@ export function makePacket(runId: string, packetId: number, seq: 0 | 1, payload:
   };
 }
 
-export function makeAck(runId: string, packetId: number, seq: 0 | 1): RdtAck {
+export function makeAck(runId: string, packetId: number, seq: number): RdtAck {
   return {
     kind: "ACK",
     runId,

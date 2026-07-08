@@ -125,7 +125,7 @@ function createPackets(runId: string, config: RunConfig, input: Buffer): RdtPack
   return Array.from({ length: totalPackets }, (_, packetId) => {
     const start = packetId * config.payloadSize;
     const payload = input.subarray(start, Math.min(start + config.payloadSize, input.byteLength));
-    const seq = (packetId % 2) as 0 | 1;
+    const seq = sequenceForPacket(config, packetId);
     const packet = makePacket(runId, packetId, seq, payload, packetId === totalPackets - 1);
     eventBus.emitRdt({
       runId,
@@ -138,6 +138,10 @@ function createPackets(runId: string, config: RunConfig, input: Buffer): RdtPack
     });
     return packet;
   });
+}
+
+function sequenceForPacket(config: RunConfig, packetId: number): number {
+  return config.protocol === "STOP_AND_WAIT" ? packetId % 2 : packetId;
 }
 
 async function sendPacket(runId: string, config: RunConfig, packet: RdtPacket, client: RdtUdpClient, serverPort: number, attempt: number): Promise<number> {
@@ -248,12 +252,13 @@ async function executeStopAndWait(runId: string, config: RunConfig, packets: Rdt
 async function executeGoBackN(runId: string, config: RunConfig, packets: RdtPacket[], client: RdtUdpClient, serverPort: number, signal: AbortSignal): Promise<void> {
   const attempts = new Map<number, number>();
   const sendTimes = new Map<number, number>();
+  const windowSize = Math.max(1, config.windowSize);
   let base = 0;
   let next = 0;
 
   while (base < packets.length) {
     if (signal.aborted) throw new Error("Transmissao parada pelo usuario");
-    while (next < packets.length && next < base + config.windowSize) {
+    while (next < packets.length && next < base + windowSize) {
       const packet = packets[next];
       const attempt = (attempts.get(packet.packetId) ?? 0) + 1;
       attempts.set(packet.packetId, attempt);
@@ -271,7 +276,9 @@ async function executeGoBackN(runId: string, config: RunConfig, packets: RdtPack
       metadata: { timeoutMs: config.timeoutMs, base, next }
     });
 
-    const ack = await client.waitForAnyAck(config.timeoutMs, signal);
+    const baseSentAt = sendTimes.get(base) ?? Date.now();
+    const remainingTimeoutMs = Math.max(0, config.timeoutMs - (Date.now() - baseSentAt));
+    const ack = remainingTimeoutMs > 0 ? await client.waitForCumulativeAck(base, remainingTimeoutMs, signal) : null;
     if (signal.aborted) throw new Error("Transmissao parada pelo usuario");
     if (ack && ack.packetId < base) {
       continue;
@@ -296,13 +303,12 @@ async function executeGoBackN(runId: string, config: RunConfig, packets: RdtPack
       continue;
     }
 
-    const basePacket = packets[base];
-    emitTimeoutAndRetransmission(runId, config, basePacket, attempts.get(basePacket.packetId) ?? 1);
     for (let packetId = base; packetId < next; packetId += 1) {
       const packet = packets[packetId];
-      const attempt = (attempts.get(packet.packetId) ?? 0) + 1;
+      const previousAttempt = attempts.get(packet.packetId) ?? 1;
+      emitTimeoutAndRetransmission(runId, config, packet, previousAttempt);
+      const attempt = previousAttempt + 1;
       attempts.set(packet.packetId, attempt);
-      if (packetId !== base) emitTimeoutAndRetransmission(runId, config, packet, attempt - 1);
       sendTimes.set(packet.packetId, await sendPacket(runId, config, packet, client, serverPort, attempt));
     }
   }
@@ -313,32 +319,24 @@ async function executeSelectiveRepeat(runId: string, config: RunConfig, packets:
   const attempts = new Map<number, number>();
   const sendTimes = new Map<number, number>();
   const sentAt = new Map<number, number>();
+  const windowSize = Math.max(1, config.windowSize);
   let base = 0;
+  let nextPacketId = 0;
 
   while (acked.size < packets.length) {
     if (signal.aborted) throw new Error("Transmissao parada pelo usuario");
     while (acked.has(base)) base += 1;
 
-    for (let packetId = base; packetId < Math.min(packets.length, base + config.windowSize); packetId += 1) {
+    while (nextPacketId < packets.length && nextPacketId < base + windowSize) {
+      await sendSelectiveRepeatPacket(runId, config, packets[nextPacketId], client, serverPort, attempts, sendTimes, sentAt, false, base, windowSize);
+      nextPacketId += 1;
+    }
+
+    for (let packetId = base; packetId < Math.min(packets.length, base + windowSize); packetId += 1) {
       if (acked.has(packetId)) continue;
-      const due = !sentAt.has(packetId) || Date.now() - (sentAt.get(packetId) ?? 0) >= config.timeoutMs;
-      if (!due) continue;
-      const packet = packets[packetId];
-      const attempt = (attempts.get(packetId) ?? 0) + 1;
-      attempts.set(packetId, attempt);
-      if (attempt > 1) emitTimeoutAndRetransmission(runId, config, packet, attempt - 1);
-      const sent = await sendPacket(runId, config, packet, client, serverPort, attempt);
-      sentAt.set(packetId, sent);
-      sendTimes.set(packetId, sent);
-      eventBus.emitRdt({
-        runId,
-        protocol: config.protocol,
-        packetId,
-        seq: packet.seq,
-        type: "TIMER_STARTED",
-        message: `[CLIENT] Selective Repeat timer started for packet ${packetId}`,
-        metadata: { timeoutMs: config.timeoutMs, windowBase: base }
-      });
+      const lastSentAt = sentAt.get(packetId);
+      if (lastSentAt == null || Date.now() - lastSentAt < config.timeoutMs) continue;
+      await sendSelectiveRepeatPacket(runId, config, packets[packetId], client, serverPort, attempts, sendTimes, sentAt, true, base, windowSize);
     }
 
     const ack = await client.waitForAnyAck(Math.max(50, Math.min(config.timeoutMs, 250)), signal);
@@ -356,6 +354,37 @@ async function executeSelectiveRepeat(runId: string, config: RunConfig, packets:
       });
     }
   }
+}
+
+async function sendSelectiveRepeatPacket(
+  runId: string,
+  config: RunConfig,
+  packet: RdtPacket,
+  client: RdtUdpClient,
+  serverPort: number,
+  attempts: Map<number, number>,
+  sendTimes: Map<number, number>,
+  sentAt: Map<number, number>,
+  retransmission: boolean,
+  windowBase: number,
+  windowSize: number
+): Promise<void> {
+  const previousAttempt = attempts.get(packet.packetId) ?? 0;
+  if (retransmission) emitTimeoutAndRetransmission(runId, config, packet, Math.max(1, previousAttempt));
+  const attempt = previousAttempt + 1;
+  attempts.set(packet.packetId, attempt);
+  const sent = await sendPacket(runId, config, packet, client, serverPort, attempt);
+  sendTimes.set(packet.packetId, sent);
+  sentAt.set(packet.packetId, sent);
+  eventBus.emitRdt({
+    runId,
+    protocol: config.protocol,
+    packetId: packet.packetId,
+    seq: packet.seq,
+    type: "TIMER_STARTED",
+    message: `[CLIENT] Selective Repeat timer started for packet ${packet.packetId}`,
+    metadata: { timeoutMs: config.timeoutMs, attempt, windowBase, windowEnd: windowBase + windowSize - 1, windowSize }
+  });
 }
 
 function emitTimeoutAndRetransmission(runId: string, config: RunConfig, packet: RdtPacket, attempt: number): void {

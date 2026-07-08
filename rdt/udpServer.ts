@@ -9,6 +9,7 @@ export class RdtUdpServer {
   private socket = dgram.createSocket("udp4");
   private receivedPacketIds = new Set<number>();
   private bufferedPackets = new Map<number, RdtPacket>();
+  private stateQueue: Promise<void> = Promise.resolve();
   private expectedSeq: 0 | 1 = 0;
   private expectedPacketId = 0;
   private outputPath = "";
@@ -121,16 +122,28 @@ export class RdtUdpServer {
       return;
     }
 
-    if (this.config.protocol === "GO_BACK_N") {
-      await this.handleGoBackN(packet, rinfo);
-      return;
-    }
+    await this.enqueueStateUpdate(async () => {
+      if (this.config.protocol === "GO_BACK_N") {
+        await this.handleGoBackN(packet, rinfo);
+        return;
+      }
 
-    if (this.config.protocol === "SELECTIVE_REPEAT") {
-      await this.handleSelectiveRepeat(packet, rinfo);
-      return;
-    }
+      if (this.config.protocol === "SELECTIVE_REPEAT") {
+        await this.handleSelectiveRepeat(packet, rinfo);
+        return;
+      }
 
+      await this.handleStopAndWait(packet, rinfo);
+    });
+  }
+
+  private async enqueueStateUpdate(work: () => Promise<void>): Promise<void> {
+    const task = this.stateQueue.then(work, work);
+    this.stateQueue = task.catch(() => undefined);
+    return task;
+  }
+
+  private async handleStopAndWait(packet: RdtPacket, rinfo: RemoteInfo): Promise<void> {
     if (this.receivedPacketIds.has(packet.packetId) || packet.seq !== this.expectedSeq) {
       eventBus.emitRdt({
         runId: this.runId,
@@ -146,7 +159,6 @@ export class RdtUdpServer {
     }
 
     await this.writePacket(packet);
-
     await this.sendAck(packet, rinfo);
     this.expectedSeq = this.expectedSeq === 0 ? 1 : 0;
   }
@@ -171,12 +183,13 @@ export class RdtUdpServer {
 
     if (this.expectedPacketId > 0) {
       const ackPacketId = this.expectedPacketId - 1;
-      await this.sendAck({ ...packet, packetId: ackPacketId, seq: (ackPacketId % 2) as 0 | 1 }, rinfo);
+      await this.sendAck({ ...packet, packetId: ackPacketId, seq: ackPacketId }, rinfo);
     }
   }
 
   private async handleSelectiveRepeat(packet: RdtPacket, rinfo: RemoteInfo): Promise<void> {
-    const windowEnd = this.expectedPacketId + Math.max(1, this.config.windowSize);
+    const receiverWindowSize = Math.max(1, this.config.windowSize);
+    const windowEnd = this.expectedPacketId + receiverWindowSize - 1;
     if (packet.packetId < this.expectedPacketId || this.receivedPacketIds.has(packet.packetId)) {
       eventBus.emitRdt({
         runId: this.runId,
@@ -190,16 +203,29 @@ export class RdtUdpServer {
       return;
     }
 
-    if (packet.packetId >= windowEnd) {
+    if (packet.packetId > windowEnd) {
       eventBus.emitRdt({
         runId: this.runId,
         protocol: this.config.protocol,
         packetId: packet.packetId,
         seq: packet.seq,
         type: "DUPLICATE_RECEIVED",
-        message: `[SERVER] Packet ${packet.packetId} outside Selective Repeat window ${this.expectedPacketId}-${windowEnd - 1}`,
-        metadata: { expectedPacketId: this.expectedPacketId, windowSize: this.config.windowSize }
+        message: `[SERVER] Packet ${packet.packetId} outside Selective Repeat window ${this.expectedPacketId}-${windowEnd}`,
+        metadata: { expectedPacketId: this.expectedPacketId, windowEnd, windowSize: receiverWindowSize }
       });
+      return;
+    }
+
+    if (this.bufferedPackets.has(packet.packetId)) {
+      eventBus.emitRdt({
+        runId: this.runId,
+        protocol: this.config.protocol,
+        packetId: packet.packetId,
+        seq: packet.seq,
+        type: "DUPLICATE_RECEIVED",
+        message: `[SERVER] Packet ${packet.packetId} already buffered; ACK resent`
+      });
+      await this.sendAck(packet, rinfo);
       return;
     }
 

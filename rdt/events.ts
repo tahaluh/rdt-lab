@@ -26,7 +26,7 @@ export type RdtEvent = {
   timestamp: number;
   protocol: Protocol;
   packetId?: number;
-  seq?: 0 | 1;
+  seq?: number;
   type: RdtEventType;
   message: string;
   metadata?: Record<string, unknown>;
