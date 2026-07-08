@@ -169,6 +169,14 @@ export function saveRunSnapshot(runId: string): RunRecord | null {
   return result.changes > 0 ? getRun(runId) : null;
 }
 
+export function deleteRunSnapshot(runId: string): boolean {
+  const db = database();
+  return db.transaction(() => {
+    db.prepare("DELETE FROM events WHERE run_id = ?").run(runId);
+    return db.prepare("DELETE FROM runs WHERE id = ?").run(runId).changes > 0;
+  })();
+}
+
 export function listEvents(runId: string): RdtEvent[] {
   return database()
     .prepare("SELECT * FROM events WHERE run_id = ? ORDER BY id ASC")

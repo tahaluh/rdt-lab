@@ -521,30 +521,52 @@ button:disabled {
   overflow: auto;
 }
 
-.saved-replay-list button {
+.saved-replay-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 32px;
+  gap: 5px;
+}
+
+.saved-replay-open,
+.saved-replay-delete {
   width: 100%;
   border: 1px solid var(--line);
   border-radius: 7px;
   background: var(--panel-2);
   color: var(--text);
+}
+
+.saved-replay-open {
   padding: 7px;
   display: grid;
   gap: 3px;
   text-align: left;
 }
 
-.saved-replay-list button:hover {
+.saved-replay-open:hover {
   background: var(--hover);
 }
 
-.saved-replay-list b,
-.saved-replay-list span {
+.saved-replay-delete {
+  display: grid;
+  place-items: center;
+  color: #fecaca;
+  border-color: color-mix(in srgb, var(--red) 48%, var(--line));
+  background: color-mix(in srgb, var(--red) 12%, var(--panel-2));
+}
+
+.saved-replay-delete:hover {
+  background: color-mix(in srgb, var(--red) 24%, var(--panel-2));
+}
+
+.saved-replay-open b,
+.saved-replay-open span {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.saved-replay-list span,
+.saved-replay-open span,
 .saved-replay-list p {
   margin: 0;
   color: var(--muted);

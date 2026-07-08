@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
-import { Pause, Play, RotateCcw, Save, SkipBack, SkipForward, Square, UploadCloud, X } from "lucide-react";
+import { Pause, Play, RotateCcw, Save, SkipBack, SkipForward, Square, Trash2, UploadCloud, X } from "lucide-react";
 import type { PacketState, RdtEvent, RunConfig, RunRecord } from "@/rdt/events";
 
 type FileItem = { name: string; size: number };
@@ -670,6 +670,33 @@ export function RdtDashboard({ initialRunId }: { initialRunId?: string }) {
     window.history.replaceState(null, "", `/runs/${data.run.id}`);
   }
 
+  async function deleteReplay(savedRun: RunRecord): Promise<void> {
+    if (!window.confirm(`Excluir o replay ${savedRun.id.slice(0, 8)} e todos os seus eventos?`)) return;
+    const response = await fetch(`/api/runs/${savedRun.id}`, { method: "DELETE" });
+    const data = await readJson<{ deleted?: boolean; error?: string }>(response);
+    if (!response.ok || !data?.deleted) {
+      setSaveStatus(`Erro ao excluir replay: ${data?.error ?? response.statusText}`);
+      return;
+    }
+
+    setSavedRuns((current) => current.filter((item) => item.id !== savedRun.id));
+    setSaveStatus("Replay excluído");
+    if (run?.id !== savedRun.id) return;
+
+    currentRunIdRef.current = null;
+    eventIdsRef.current = new Set();
+    setRun(null);
+    setEvents([]);
+    setVisibleEvents([]);
+    setMaxRuntimePacketId(0);
+    setReplayMode(false);
+    setReplayPlaying(false);
+    setReplayCursorMs(0);
+    setReplayEventLimit(0);
+    setSelectedPacketId(0);
+    window.history.replaceState(null, "", "/");
+  }
+
   return (
     <main className="rdt-screen">
       <aside className="left-column">
@@ -948,10 +975,15 @@ export function RdtDashboard({ initialRunId }: { initialRunId?: string }) {
               </div>
               <div className="saved-replay-list">
                 {savedRuns.map((savedRun) => (
-                  <button key={savedRun.id} onClick={() => void loadReplay(savedRun.id)} type="button">
-                    <b>{protocolLabels[savedRun.protocol as LabProtocol] ?? savedRun.protocol} · {savedRun.id.slice(0, 8)}</b>
-                    <span>{savedRun.fileName} · salvo em {formatLogDate(savedRun.savedAt)}</span>
-                  </button>
+                  <div className="saved-replay-item" key={savedRun.id}>
+                    <button className="saved-replay-open" onClick={() => void loadReplay(savedRun.id)} type="button">
+                      <b>{protocolLabels[savedRun.protocol as LabProtocol] ?? savedRun.protocol} · {savedRun.id.slice(0, 8)}</b>
+                      <span>{savedRun.fileName} · salvo em {formatLogDate(savedRun.savedAt)}</span>
+                    </button>
+                    <button className="saved-replay-delete" title="Excluir replay" onClick={() => void deleteReplay(savedRun)} type="button">
+                      <Trash2 size={15} />
+                    </button>
+                  </div>
                 ))}
                 {!savedRuns.length ? <p>Nenhuma rodada salva ainda.</p> : null}
               </div>

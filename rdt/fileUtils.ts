@@ -41,6 +41,16 @@ export async function appendOutput(outputPath: string, payload: Buffer): Promise
   await fs.appendFile(outputPath, payload);
 }
 
+export async function deleteRunOutputFiles(runId: string): Promise<void> {
+  await ensureDataDirs();
+  const entries = await fs.readdir(outputDir);
+  await Promise.all(
+    entries
+      .filter((name) => name.startsWith(`${runId}-`))
+      .map((name) => fs.rm(path.join(outputDir, name), { force: true }))
+  );
+}
+
 export async function hashFilePath(filePath: string): Promise<string> {
   return fileHash(await fs.readFile(filePath));
 }
