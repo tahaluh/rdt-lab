@@ -31,12 +31,15 @@ const stateLabel: Record<PacketState, string> = {
   corrupted: "Corrompido",
   timeout: "Timeout",
   retransmitted: "Retransmitido",
+  retransmitted_acknowledged: "Retransmitido + confirmado",
   duplicated: "Duplicado"
 };
 
 function stateFromEvents(events: RdtEvent[]): PacketState {
   if (events.some((event) => event.type === "DUPLICATE_RECEIVED")) return "duplicated";
-  if (events.some((event) => event.type === "ACK_RECEIVED")) return "acknowledged";
+  if (events.some((event) => event.type === "ACK_RECEIVED")) {
+    return events.some((event) => event.type === "RETRANSMISSION") ? "retransmitted_acknowledged" : "acknowledged";
+  }
   if (events.some((event) => event.type === "PACKET_WRITTEN")) return "received";
   if (events.some((event) => event.type === "PACKET_RECEIVED")) return "received";
   if (events.some((event) => event.type === "PACKET_CORRUPTED")) return "corrupted";
@@ -645,7 +648,7 @@ export function RdtDashboard({ initialRunId }: { initialRunId?: string }) {
 
         <Card title="Visão geral dos pacotes" className="packet-overview">
           <div className="legend-row">
-            {(["pending", "sent", "received", "acknowledged", "lost", "corrupted", "timeout", "retransmitted", "duplicated"] as PacketState[]).map((state) => (
+            {(["pending", "sent", "received", "acknowledged", "retransmitted_acknowledged", "lost", "corrupted", "timeout", "retransmitted", "duplicated"] as PacketState[]).map((state) => (
               <span key={state}><i className={`dot ${state}`} />{stateLabel[state]}</span>
             ))}
           </div>

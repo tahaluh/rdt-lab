@@ -483,6 +483,11 @@ button:disabled {
   background: #22c55e;
 }
 
+.dot.retransmitted_acknowledged,
+.packet-cell.retransmitted_acknowledged {
+  background: #0f9f8f;
+}
+
 .dot.lost,
 .packet-cell.lost {
   background: #b91c1c;

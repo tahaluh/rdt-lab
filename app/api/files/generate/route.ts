@@ -4,6 +4,8 @@ import path from "node:path";
 import { NextRequest, NextResponse } from "next/server";
 import { ensureDataDirs, inputDir } from "@/rdt/fileUtils";
 
+export const dynamic = "force-dynamic";
+
 type Body = {
   mode?: "random" | "text" | "packets";
   fileName?: string;

@@ -5,7 +5,7 @@ import { attachWebSocket } from "./websocket";
 import { ensureDataDirs } from "../rdt/fileUtils";
 
 const dev = process.env.NODE_ENV !== "production";
-const hostname = "127.0.0.1";
+const hostname = process.env.HOST ?? "127.0.0.1";
 const port = Number(process.env.PORT ?? 3000);
 
 async function main() {

@@ -3,6 +3,8 @@ import { listRuns } from "@/server/db";
 import { startTransportRun } from "@/rdt/protocols/protocols";
 import type { Protocol, RunConfig } from "@/rdt/events";
 
+export const dynamic = "force-dynamic";
+
 const payloadSizes = new Set([256, 512, 1024, 1400, 4096]);
 const protocols = new Set<Protocol>(["UDP", "STOP_AND_WAIT", "GO_BACK_N", "SELECTIVE_REPEAT"]);
 

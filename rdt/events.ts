@@ -76,6 +76,7 @@ export type PacketState =
   | "corrupted"
   | "timeout"
   | "retransmitted"
+  | "retransmitted_acknowledged"
   | "duplicated";
 
 export type RunSnapshot = {

@@ -3,6 +3,8 @@ import path from "node:path";
 import { NextRequest, NextResponse } from "next/server";
 import { ensureDataDirs, inputDir } from "@/rdt/fileUtils";
 
+export const dynamic = "force-dynamic";
+
 export async function POST(request: NextRequest) {
   const formData = await request.formData();
   const file = formData.get("file");
