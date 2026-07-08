@@ -1,0 +1,28 @@
+{
+  "name": "rdt-lab",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "tsx server/server.ts",
+    "build": "next build && tsc -p tsconfig.server.json",
+    "start": "NODE_ENV=production node dist/server/server.js",
+    "seed:files": "tsx scripts/seedFiles.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^20.19.9",
+    "@types/react": "^18.3.23",
+    "@types/react-dom": "^18.3.7",
+    "@types/ws": "^8.18.1",
+    "better-sqlite3": "^11.10.0",
+    "lucide-react": "^0.468.0",
+    "next": "^14.2.30",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "tsx": "^4.20.3",
+    "typescript": "^5.8.3",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {}
+}

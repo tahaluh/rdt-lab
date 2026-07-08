@@ -1,0 +1,5 @@
+Arquivo maior para o RDT Lab.
+Use payload pequeno para gerar muitos quadradinhos no dashboard.
+Stop-and-Wait envia um pacote por vez, espera o ACK correto e retransmite quando o timer expira.
+Com perda de ACK, o servidor recebe duplicata, nao grava duas vezes e reenvia ACK.
+Com corrupcao, o servidor descarta o pacote e o cliente tenta de novo por timeout.

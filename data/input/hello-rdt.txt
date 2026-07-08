@@ -1,0 +1,3 @@
+RDT Lab demonstra Transferencia Confiavel de Dados sobre UDP.
+Este arquivo pequeno deixa Stop-and-Wait facil de acompanhar no dashboard.
+Perdas e corrupcoes sao simuladas, mas o transporte usa UDP real com node:dgram.
