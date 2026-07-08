@@ -399,6 +399,158 @@ button:disabled {
   gap: 8px;
 }
 
+.replay-card {
+  overflow: hidden;
+}
+
+.replay-card.open {
+  max-height: min(56vh, 540px);
+  overflow: auto;
+}
+
+.replay-stack {
+  display: grid;
+  gap: 8px;
+}
+
+.replay-actions {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 7px;
+  align-items: center;
+}
+
+.replay-actions .full-btn {
+  width: 100%;
+}
+
+.replay-collapsed-summary {
+  width: 100%;
+  min-height: 30px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel-2);
+  color: var(--muted);
+  font-weight: 800;
+  font-size: 11px;
+}
+
+.replay-collapsed-summary:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.replay-player {
+  display: grid;
+  gap: 7px;
+}
+
+.replay-player input[type="range"] {
+  width: 100%;
+  accent-color: var(--cyan);
+}
+
+.replay-progress {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 8px;
+  align-items: center;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.replay-progress b {
+  color: var(--text);
+  text-align: center;
+}
+
+.replay-controls {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.replay-controls button {
+  min-height: 30px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel-2);
+  color: var(--text);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  font-weight: 800;
+  font-size: 11px;
+}
+
+.replay-controls button:nth-child(2) {
+  border-color: color-mix(in srgb, var(--cyan) 55%, var(--line));
+  color: #cffafe;
+  background: color-mix(in srgb, var(--cyan) 14%, var(--panel-2));
+}
+
+.replay-settings {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.replay-settings .field {
+  margin-bottom: 0;
+}
+
+.replay-saved-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.replay-saved-header b {
+  color: var(--text);
+}
+
+.saved-replay-list {
+  display: grid;
+  gap: 6px;
+  max-height: 154px;
+  overflow: auto;
+}
+
+.saved-replay-list button {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel-2);
+  color: var(--text);
+  padding: 7px;
+  display: grid;
+  gap: 3px;
+  text-align: left;
+}
+
+.saved-replay-list button:hover {
+  background: var(--hover);
+}
+
+.saved-replay-list b,
+.saved-replay-list span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.saved-replay-list span,
+.saved-replay-list p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+
 .metric-card {
   display: grid;
   align-content: start;

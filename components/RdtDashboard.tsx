@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
-import { Pause, Play, RotateCcw, Save, Square, UploadCloud } from "lucide-react";
+import { Pause, Play, RotateCcw, Save, SkipBack, SkipForward, Square, UploadCloud, X } from "lucide-react";
 import type { PacketState, RdtEvent, RunConfig, RunRecord } from "@/rdt/events";
 
 type FileItem = { name: string; size: number };
@@ -14,6 +14,8 @@ type EventOrder = { byId: Map<number, number>; byRef: Map<RdtEvent, number> };
 
 const payloadOptions = [256, 512, 1024, 1400, 4096];
 const windowOptions = [1, 4, 8, 16, 32, 64];
+const replaySpeeds = [0.1, 0.25, 0.5, 1, 2, 4];
+const replayStepOptions = [1, 10, 100];
 const protocolLabels: Record<LabProtocol, string> = {
   UDP: "UDP puro",
   STOP_AND_WAIT: "Stop-and-Wait",
@@ -90,6 +92,13 @@ function formatElapsed(ms: number): string {
   return `${Math.floor(seconds / 60).toString().padStart(2, "0")}:${(seconds % 60).toString().padStart(2, "0")}`;
 }
 
+function formatReplayMs(ms: number): string {
+  const safeMs = Math.max(0, Math.floor(ms));
+  const seconds = Math.floor(safeMs / 1000);
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes.toString().padStart(2, "0")}:${(seconds % 60).toString().padStart(2, "0")}.${Math.floor((safeMs % 1000) / 100)}`;
+}
+
 function bytesForSize(size: string, customKb: number): number {
   if (size === "10kb") return 10 * 1024;
   if (size === "100kb") return 100 * 1024;
@@ -103,6 +112,16 @@ function maxRuntimePacketIdFromEvents(events: RdtEvent[]): number {
     if (event.packetId == null || event.type === "PACKET_CREATED") return maxPacketId;
     return Math.max(maxPacketId, event.packetId);
   }, 0);
+}
+
+function replayEventLimitAtCursor(events: RdtEvent[], baseTimestamp: number, cursorMs: number): number {
+  const cursorTimestamp = baseTimestamp + cursorMs;
+  let limit = 0;
+  for (const event of events) {
+    if (event.timestamp > cursorTimestamp) break;
+    limit += 1;
+  }
+  return limit;
 }
 
 function useTicker(active: boolean): number {
@@ -155,6 +174,14 @@ export function RdtDashboard({ initialRunId }: { initialRunId?: string }) {
   const [saveStatus, setSaveStatus] = useState("");
   const [starting, setStarting] = useState(false);
   const [stopping, setStopping] = useState(false);
+  const [savedRuns, setSavedRuns] = useState<RunRecord[]>([]);
+  const [replayMode, setReplayMode] = useState(false);
+  const [replayPlaying, setReplayPlaying] = useState(false);
+  const [replaySpeed, setReplaySpeed] = useState(1);
+  const [replayStepSize, setReplayStepSize] = useState(1);
+  const [replayCursorMs, setReplayCursorMs] = useState(0);
+  const [replayEventLimit, setReplayEventLimit] = useState(0);
+  const [replayPanelOpen, setReplayPanelOpen] = useState(false);
 
   const [sourceMode, setSourceMode] = useState<SourceMode>("random");
   const [selectedFile, setSelectedFile] = useState("");
@@ -172,7 +199,6 @@ export function RdtDashboard({ initialRunId }: { initialRunId?: string }) {
   const [rtt, setRtt] = useState(60);
   const [timeoutMs, setTimeoutMs] = useState(1000);
   const [slowMode, setSlowMode] = useState(false);
-  const [autoPlay, setAutoPlay] = useState(true);
   const [windowMode, setWindowMode] = useState<WindowMode>("preset");
   const [windowSize, setWindowSize] = useState(4);
   const [customWindowSize, setCustomWindowSize] = useState(12);
@@ -180,7 +206,7 @@ export function RdtDashboard({ initialRunId }: { initialRunId?: string }) {
   const eventIdsRef = useRef(new Set<number>());
   const pausedRef = useRef(paused);
   const startingRef = useRef(starting);
-  const now = useTicker(run?.status === "running" && !paused);
+  const now = useTicker(run?.status === "running" && !paused && !replayMode);
   const statsNow = paused && pausedAt ? pausedAt : now;
   const isRunning = run?.status === "running";
 
@@ -191,6 +217,13 @@ export function RdtDashboard({ initialRunId }: { initialRunId?: string }) {
     setSelectedFile((current) => current || data.files[0]?.name || "");
   }, []);
 
+  const loadSavedRuns = useCallback(async () => {
+    const response = await fetch("/api/runs", { cache: "no-store" });
+    if (!response.ok) return;
+    const data = (await response.json()) as { runs: RunRecord[] };
+    setSavedRuns(data.runs.filter((item) => item.savedAt != null));
+  }, []);
+
   const loadRun = useCallback(async (runId: string) => {
     const response = await fetch(`/api/runs/${runId}`, { cache: "no-store" });
     if (!response.ok) return;
@@ -198,6 +231,8 @@ export function RdtDashboard({ initialRunId }: { initialRunId?: string }) {
     currentRunIdRef.current = data.run.id;
     eventIdsRef.current = new Set(data.events.map((event) => event.id).filter((id): id is number => id != null));
     setRun(data.run);
+    setLabProtocol(data.run.protocol as LabProtocol);
+    setPayloadSize(data.run.payloadSize);
     setEvents(data.events);
     setMaxRuntimePacketId(maxRuntimePacketIdFromEvents(data.events));
     if (!pausedRef.current) setVisibleEvents(data.events);
@@ -224,7 +259,8 @@ export function RdtDashboard({ initialRunId }: { initialRunId?: string }) {
 
   useEffect(() => {
     void loadFiles();
-  }, [loadFiles]);
+    void loadSavedRuns();
+  }, [loadFiles, loadSavedRuns]);
 
   useEffect(() => {
     if (initialRunId) void loadRun(initialRunId);
@@ -265,7 +301,50 @@ export function RdtDashboard({ initialRunId }: { initialRunId?: string }) {
     setPacketJump(String(selectedPacketId));
   }, [selectedPacketId]);
 
-  const currentEvents = paused ? visibleEvents : events;
+  const replayBaseTimestamp = events[0]?.timestamp ?? run?.startedAt ?? 0;
+  const replayDurationMs = Math.max(0, (events.at(-1)?.timestamp ?? run?.finishedAt ?? replayBaseTimestamp) - replayBaseTimestamp);
+
+  useEffect(() => {
+    if (!replayMode || !replayPlaying) return;
+    let previous = performance.now();
+    const timer = window.setInterval(() => {
+      const current = performance.now();
+      const delta = (current - previous) * replaySpeed;
+      previous = current;
+      setReplayCursorMs((cursor) => {
+        const nextCursor = Math.min(replayDurationMs, cursor + delta);
+        setReplayEventLimit(replayEventLimitAtCursor(events, replayBaseTimestamp, nextCursor));
+        return nextCursor;
+      });
+    }, 50);
+    return () => window.clearInterval(timer);
+  }, [events, replayBaseTimestamp, replayDurationMs, replayMode, replayPlaying, replaySpeed]);
+
+  useEffect(() => {
+    if (replayMode && (replayCursorMs >= replayDurationMs || replayEventLimit >= events.length)) setReplayPlaying(false);
+  }, [events.length, replayCursorMs, replayDurationMs, replayEventLimit, replayMode]);
+
+  const replayEvents = useMemo(() => {
+    if (!replayMode) return events;
+    return events.slice(0, replayEventLimit);
+  }, [events, replayEventLimit, replayMode]);
+  const currentEvents = replayMode ? replayEvents : paused ? visibleEvents : events;
+  const currentPacketId = replayMode ? maxRuntimePacketIdFromEvents(currentEvents) : maxRuntimePacketId;
+  const replayVisibleCount = replayMode ? Math.min(replayEventLimit, events.length) : events.length;
+  const replayJumpOptions = useMemo(() => {
+    if (!events.length) return [];
+    const maxOptions = 120;
+    const step = Math.max(1, Math.ceil(events.length / maxOptions));
+    const indexes = new Set<number>([0, events.length - 1]);
+    for (let index = 0; index < events.length; index += step) indexes.add(index);
+    return [...indexes].sort((a, b) => a - b).map((index) => {
+      const event = events[index];
+      return {
+        index,
+        label: `#${index + 1} - ${formatReplayMs(event.timestamp - replayBaseTimestamp)} - ${event.type.replaceAll("_", " ")}`
+      };
+    });
+  }, [events, replayBaseTimestamp]);
   const eventOrder = useMemo<EventOrder>(() => {
     const byId = new Map<number, number>();
     const byRef = new Map<RdtEvent, number>();
@@ -316,7 +395,7 @@ export function RdtDashboard({ initialRunId }: { initialRunId?: string }) {
     const rtts = currentEvents
       .map((event) => (typeof event.metadata?.rttMs === "number" ? event.metadata.rttMs : null))
       .filter((value): value is number => value != null);
-    const elapsedMs = run ? (run.finishedAt ?? statsNow) - run.startedAt : 0;
+    const elapsedMs = run ? (replayMode ? replayCursorMs : (run.finishedAt ?? statsNow) - run.startedAt) : 0;
     const usefulThroughput = run && elapsedMs > 0 ? Math.min(run.fileSize, confirmed * run.payloadSize) / (elapsedMs / 1000) : 0;
     const grossThroughput = run && elapsedMs > 0 ? packetsSent * run.payloadSize / (elapsedMs / 1000) : 0;
     return {
@@ -335,7 +414,7 @@ export function RdtDashboard({ initialRunId }: { initialRunId?: string }) {
       efficiency: packetsSent > 0 ? (confirmed / packetsSent) * 100 : 0,
       progress: runTotalPackets > 0 ? Math.min(100, (confirmed / runTotalPackets) * 100) : 0
     };
-  }, [activeProtocol, currentEvents, run, runTotalPackets, statsNow]);
+  }, [activeProtocol, currentEvents, replayCursorMs, replayMode, run, runTotalPackets, statsNow]);
 
   const selectedPacket = packets[selectedPacketId] ?? packets[0];
   const latestSeq = [...currentEvents].reverse().find((event) => event.seq != null)?.seq;
@@ -378,6 +457,10 @@ export function RdtDashboard({ initialRunId }: { initialRunId?: string }) {
   async function startRun() {
     if (starting || stopping || isRunning) return;
     setStarting(true);
+    setReplayMode(false);
+    setReplayPlaying(false);
+    setReplayCursorMs(0);
+    setReplayEventLimit(0);
     currentRunIdRef.current = null;
     eventIdsRef.current = new Set();
     setRun(null);
@@ -486,6 +569,7 @@ export function RdtDashboard({ initialRunId }: { initialRunId?: string }) {
     setMaxRuntimePacketId(maxRuntimePacketIdFromEvents(data.events));
     if (!paused) setVisibleEvents(data.events);
     setSaveStatus(`Salvo no banco às ${formatClock(data.run.savedAt)}`);
+    await loadSavedRuns();
   }
 
   async function clearRound() {
@@ -505,6 +589,11 @@ export function RdtDashboard({ initialRunId }: { initialRunId?: string }) {
     setPausedAt(null);
     setEvents([]);
     setMaxRuntimePacketId(0);
+    setReplayMode(false);
+    setReplayPlaying(false);
+    setReplayCursorMs(0);
+    setReplayEventLimit(0);
+    setReplayPanelOpen(false);
     setVisibleEvents([]);
     setClearedLogAt(0);
     setSaveStatus("");
@@ -516,6 +605,69 @@ export function RdtDashboard({ initialRunId }: { initialRunId?: string }) {
     const next = Math.min(Math.max(0, packetId), Math.max(0, runTotalPackets - 1));
     setSelectedPacketId(next);
     setPacketJump(String(next));
+  }
+
+  function openReplay(): void {
+    if (!run || !events.length || run.status === "running") return;
+    setReplayMode(true);
+    setReplayPlaying(false);
+    setReplayCursorMs(0);
+    setReplayEventLimit(1);
+    setReplayPanelOpen(true);
+    setPaused(false);
+    setPausedAt(null);
+    setClearedLogAt(0);
+    setSelectedPacketId(0);
+  }
+
+  function closeReplay(): void {
+    setReplayMode(false);
+    setReplayPlaying(false);
+    setReplayCursorMs(0);
+    setReplayEventLimit(0);
+    if (!pausedRef.current) setVisibleEvents(events);
+  }
+
+  function jumpReplayToEvent(index: number): void {
+    const nextIndex = Math.min(Math.max(0, index), Math.max(0, events.length - 1));
+    const event = events[nextIndex];
+    if (!event) return;
+    setReplayCursorMs(Math.max(0, event.timestamp - replayBaseTimestamp));
+    setReplayEventLimit(nextIndex + 1);
+  }
+
+  function stepReplay(direction: -1 | 1): void {
+    if (!events.length) return;
+    const currentIndex = Math.max(0, replayVisibleCount - 1);
+    const nextIndex = direction > 0
+      ? Math.min(events.length - 1, currentIndex + replayStepSize)
+      : Math.max(0, currentIndex - replayStepSize);
+    jumpReplayToEvent(nextIndex);
+    setReplayPlaying(false);
+  }
+
+  async function loadReplay(runId: string): Promise<void> {
+    const response = await fetch(`/api/runs/${runId}`, { cache: "no-store" });
+    if (!response.ok) return;
+    const data = (await response.json()) as { run: RunRecord; events: RdtEvent[] };
+    currentRunIdRef.current = data.run.id;
+    eventIdsRef.current = new Set(data.events.map((event) => event.id).filter((id): id is number => id != null));
+    setRun(data.run);
+    setLabProtocol(data.run.protocol as LabProtocol);
+    setPayloadSize(data.run.payloadSize);
+    setEvents(data.events);
+    setMaxRuntimePacketId(maxRuntimePacketIdFromEvents(data.events));
+    setVisibleEvents([]);
+    setReplayMode(true);
+    setReplayPlaying(false);
+    setReplayCursorMs(0);
+    setReplayEventLimit(data.events.length ? 1 : 0);
+    setReplayPanelOpen(true);
+    setPaused(false);
+    setPausedAt(null);
+    setClearedLogAt(0);
+    setSelectedPacketId(0);
+    window.history.replaceState(null, "", `/runs/${data.run.id}`);
   }
 
   return (
@@ -614,7 +766,6 @@ export function RdtDashboard({ initialRunId }: { initialRunId?: string }) {
           <h3 className="config-subtitle">Execução</h3>
           {hasReliability ? <NumberField label="Timeout do cliente" value={timeoutMs} setValue={setTimeoutMs} suffix="ms" min={100} max={10000} step={100} /> : null}
           <Toggle label="Modo lento" checked={slowMode} setChecked={setSlowMode} />
-          {hasReliability ? <Toggle label="Play automático" checked={autoPlay} setChecked={setAutoPlay} /> : null}
         </Card>
 
         <Card title="Canal não confiável (simulação)">
@@ -652,7 +803,7 @@ export function RdtDashboard({ initialRunId }: { initialRunId?: string }) {
               <span key={state}><i className={`dot ${state}`} />{stateLabel[state]}</span>
             ))}
           </div>
-          <PacketGrid packets={packets} currentPacketId={maxRuntimePacketId} selectedPacketId={selectedPacketId} setSelectedPacketId={selectPacket} />
+          <PacketGrid packets={packets} currentPacketId={currentPacketId} selectedPacketId={selectedPacketId} setSelectedPacketId={selectPacket} />
           <div className="packet-nav">
             <span>Clique em um pacote para ver os detalhes.</span>
             <form onSubmit={(event) => {
@@ -718,7 +869,98 @@ export function RdtDashboard({ initialRunId }: { initialRunId?: string }) {
             </button>
           </div>
           {saveStatus ? <p className="save-status">{saveStatus}</p> : null}
-          <button className="full-btn" disabled={!run} type="button">Abrir replay</button>
+        </Card>
+
+        <Card
+          title="Replay"
+          action={(
+            <button className="tiny-btn" onClick={() => setReplayPanelOpen((value) => !value)} type="button">
+              {replayPanelOpen ? "Recolher" : "Expandir"}
+            </button>
+          )}
+          className={`replay-card ${replayPanelOpen ? "open" : "collapsed"}`}
+        >
+          {replayPanelOpen ? (
+            <div className="replay-stack">
+              <div className="replay-actions">
+                <button className="full-btn" disabled={!run || run.status === "running" || !events.length} onClick={openReplay} type="button">
+                  <Play size={15} /> {replayMode ? "Replay ativo" : "Abrir replay atual"}
+                </button>
+                {replayMode ? <button className="tiny-btn" onClick={closeReplay} type="button"><X size={13} /> Sair</button> : null}
+              </div>
+              {replayMode ? (
+                <div className="replay-player">
+                  <div className="replay-progress">
+                    <span>{formatReplayMs(replayCursorMs)}</span>
+                    <b>{replayVisibleCount}/{events.length} eventos</b>
+                    <span>{formatReplayMs(replayDurationMs)}</span>
+                  </div>
+                  <input
+                    aria-label="Tempo do replay"
+                    type="range"
+                    min={0}
+                    max={Math.max(1, replayDurationMs)}
+                    value={Math.min(replayCursorMs, replayDurationMs)}
+                    onChange={(event) => {
+                      const nextCursor = Number(event.target.value);
+                      setReplayCursorMs(nextCursor);
+                      setReplayEventLimit(replayEventLimitAtCursor(events, replayBaseTimestamp, nextCursor));
+                      setReplayPlaying(false);
+                    }}
+                  />
+                  <div className="replay-controls">
+                    <button onClick={() => stepReplay(-1)} disabled={replayVisibleCount <= 1} type="button"><SkipBack size={14} /> -{replayStepSize}</button>
+                    <button onClick={() => setReplayPlaying((value) => !value)} disabled={!events.length} type="button">
+                      {replayPlaying ? <Pause size={14} /> : <Play size={14} />}
+                      {replayPlaying ? "Pausar" : "Play"}
+                    </button>
+                    <button onClick={() => stepReplay(1)} disabled={replayVisibleCount >= events.length} type="button">+{replayStepSize} <SkipForward size={14} /></button>
+                  </div>
+                  <div className="replay-settings">
+                    <Field label="Velocidade do tempo">
+                      <select value={replaySpeed} onChange={(event) => setReplaySpeed(Number(event.target.value))}>
+                        {replaySpeeds.map((speed) => <option key={speed} value={speed}>{speed === 0.1 ? "1/10x" : speed === 0.25 ? "1/4x" : speed === 0.5 ? "1/2x" : `${speed}x`}</option>)}
+                      </select>
+                    </Field>
+                    <Field label="Passo por clique">
+                      <select value={replayStepSize} onChange={(event) => setReplayStepSize(Number(event.target.value))}>
+                        {replayStepOptions.map((step) => <option key={step} value={step}>{step} evento{step > 1 ? "s" : ""}</option>)}
+                      </select>
+                    </Field>
+                  </div>
+                  <Field label="Ir para tempo/evento">
+                    <select value="" onChange={(event) => {
+                      if (event.target.value) {
+                        jumpReplayToEvent(Number(event.target.value));
+                        setReplayPlaying(false);
+                      }
+                    }}>
+                      <option value="">Selecionar marcador</option>
+                      {replayJumpOptions.map((option) => <option key={option.index} value={option.index}>{option.label}</option>)}
+                    </select>
+                  </Field>
+                </div>
+              ) : null}
+
+              <div className="replay-saved-header">
+                <b>Replays salvos</b>
+                <button className="tiny-btn" onClick={() => void loadSavedRuns()} type="button">Atualizar</button>
+              </div>
+              <div className="saved-replay-list">
+                {savedRuns.map((savedRun) => (
+                  <button key={savedRun.id} onClick={() => void loadReplay(savedRun.id)} type="button">
+                    <b>{protocolLabels[savedRun.protocol as LabProtocol] ?? savedRun.protocol} · {savedRun.id.slice(0, 8)}</b>
+                    <span>{savedRun.fileName} · salvo em {formatLogDate(savedRun.savedAt)}</span>
+                  </button>
+                ))}
+                {!savedRuns.length ? <p>Nenhuma rodada salva ainda.</p> : null}
+              </div>
+            </div>
+          ) : (
+            <button className="replay-collapsed-summary" onClick={() => setReplayPanelOpen(true)} type="button">
+              {savedRuns.length} replay{savedRuns.length === 1 ? "" : "s"} salvo{savedRuns.length === 1 ? "" : "s"}{replayMode ? " · replay ativo" : ""}
+            </button>
+          )}
         </Card>
 
         <Card title="Estatísticas da rodada" className="stats-card">
