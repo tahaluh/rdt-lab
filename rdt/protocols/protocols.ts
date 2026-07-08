@@ -161,7 +161,7 @@ async function sendPacket(runId: string, config: RunConfig, packet: RdtPacket, c
 
 async function executeUdp(runId: string, config: RunConfig, packets: RdtPacket[], client: RdtUdpClient, serverPort: number, signal: AbortSignal): Promise<void> {
   const sendTimes = new Map<number, number>();
-  const sendPaceMs = Math.min(20, Math.max(2, Math.floor(artificialDelay(config) / 50)));
+  const sendPaceMs = config.demoMode ? Math.min(20, Math.max(2, Math.floor(artificialDelay(config) / 50))) : 0;
   for (const packet of packets) {
     if (signal.aborted) throw new Error("Transmissao parada pelo usuario");
     sendTimes.set(packet.packetId, await sendPacket(runId, config, packet, client, serverPort, 1));
@@ -318,42 +318,54 @@ async function executeSelectiveRepeat(runId: string, config: RunConfig, packets:
   const acked = new Set<number>();
   const attempts = new Map<number, number>();
   const sendTimes = new Map<number, number>();
-  const sentAt = new Map<number, number>();
+  const inFlight = new Map<number, number>();
   const windowSize = Math.max(1, config.windowSize);
-  let base = 0;
   let nextPacketId = 0;
 
   while (acked.size < packets.length) {
     if (signal.aborted) throw new Error("Transmissao parada pelo usuario");
-    while (acked.has(base)) base += 1;
 
-    while (nextPacketId < packets.length && nextPacketId < base + windowSize) {
-      await sendSelectiveRepeatPacket(runId, config, packets[nextPacketId], client, serverPort, attempts, sendTimes, sentAt, false, base, windowSize);
+    while (nextPacketId < packets.length && inFlight.size < windowSize) {
+      await sendSelectiveRepeatPacket(runId, config, packets[nextPacketId], client, serverPort, attempts, sendTimes, inFlight, false, windowSize);
       nextPacketId += 1;
     }
 
-    for (let packetId = base; packetId < Math.min(packets.length, base + windowSize); packetId += 1) {
-      if (acked.has(packetId)) continue;
-      const lastSentAt = sentAt.get(packetId);
-      if (lastSentAt == null || Date.now() - lastSentAt < config.timeoutMs) continue;
-      await sendSelectiveRepeatPacket(runId, config, packets[packetId], client, serverPort, attempts, sendTimes, sentAt, true, base, windowSize);
+    for (const [packetId, lastSentAt] of Array.from(inFlight)) {
+      if (acked.has(packetId)) {
+        inFlight.delete(packetId);
+        continue;
+      }
+      if (Date.now() - lastSentAt < config.timeoutMs) continue;
+      await sendSelectiveRepeatPacket(runId, config, packets[packetId], client, serverPort, attempts, sendTimes, inFlight, true, windowSize);
     }
 
-    const ack = await client.waitForAnyAck(Math.max(50, Math.min(config.timeoutMs, 250)), signal);
-    if (ack && !acked.has(ack.packetId) && ack.packetId < packets.length) {
+    const ack = await client.waitForAnyAck(selectiveRepeatAckWaitMs(config, inFlight), signal);
+    if (ack && ack.packetId < packets.length) {
       const packet = packets[ack.packetId];
+      const wasNewAck = !acked.has(ack.packetId);
       acked.add(ack.packetId);
-      eventBus.emitRdt({
-        runId,
-        protocol: config.protocol,
-        packetId: ack.packetId,
-        seq: packet.seq,
-        type: "ACK_RECEIVED",
-        message: `[CLIENT] Selective ACK received for packet ${ack.packetId}`,
-        metadata: { selectiveAck: true, rttMs: Date.now() - (sendTimes.get(ack.packetId) ?? Date.now()) }
-      });
+      inFlight.delete(ack.packetId);
+      if (wasNewAck) {
+        eventBus.emitRdt({
+          runId,
+          protocol: config.protocol,
+          packetId: ack.packetId,
+          seq: packet.seq,
+          type: "ACK_RECEIVED",
+          message: `[CLIENT] Selective ACK received for packet ${ack.packetId}`,
+          metadata: { selectiveAck: true, rttMs: Date.now() - (sendTimes.get(ack.packetId) ?? Date.now()), inFlight: inFlight.size, windowSize }
+        });
+      }
     }
   }
+}
+
+function selectiveRepeatAckWaitMs(config: RunConfig, inFlight: Map<number, number>): number {
+  if (config.demoMode) return Math.max(50, Math.min(config.timeoutMs, 250));
+  if (!inFlight.size) return 0;
+  const now = Date.now();
+  const nextTimeoutMs = Math.min(...Array.from(inFlight.values()).map((sentAt) => Math.max(0, config.timeoutMs - (now - sentAt))));
+  return Math.max(0, nextTimeoutMs);
 }
 
 async function sendSelectiveRepeatPacket(
@@ -364,9 +376,8 @@ async function sendSelectiveRepeatPacket(
   serverPort: number,
   attempts: Map<number, number>,
   sendTimes: Map<number, number>,
-  sentAt: Map<number, number>,
+  inFlight: Map<number, number>,
   retransmission: boolean,
-  windowBase: number,
   windowSize: number
 ): Promise<void> {
   const previousAttempt = attempts.get(packet.packetId) ?? 0;
@@ -375,7 +386,7 @@ async function sendSelectiveRepeatPacket(
   attempts.set(packet.packetId, attempt);
   const sent = await sendPacket(runId, config, packet, client, serverPort, attempt);
   sendTimes.set(packet.packetId, sent);
-  sentAt.set(packet.packetId, sent);
+  inFlight.set(packet.packetId, sent);
   eventBus.emitRdt({
     runId,
     protocol: config.protocol,
@@ -383,7 +394,7 @@ async function sendSelectiveRepeatPacket(
     seq: packet.seq,
     type: "TIMER_STARTED",
     message: `[CLIENT] Selective Repeat timer started for packet ${packet.packetId}`,
-    metadata: { timeoutMs: config.timeoutMs, attempt, windowBase, windowEnd: windowBase + windowSize - 1, windowSize }
+    metadata: { timeoutMs: config.timeoutMs, attempt, inFlight: inFlight.size, windowSize }
   });
 }
 

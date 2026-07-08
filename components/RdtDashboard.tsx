@@ -6,7 +6,7 @@ import { Pause, Play, RotateCcw, Save, Square, UploadCloud } from "lucide-react"
 import type { PacketState, RdtEvent, RunConfig, RunRecord } from "@/rdt/events";
 
 type FileItem = { name: string; size: number };
-type SocketMessage = { type: "event"; event: RdtEvent } | { type: "run-started"; runId: string } | { type: "run-finished"; runId: string };
+type SocketMessage = { type: "event"; event: RdtEvent } | { type: "events"; events: RdtEvent[] } | { type: "run-started"; runId: string } | { type: "run-finished"; runId: string };
 type SourceMode = "upload" | "text" | "random" | "packets";
 type LabProtocol = "UDP" | "STOP_AND_WAIT" | "GO_BACK_N" | "SELECTIVE_REPEAT";
 type WindowMode = "preset" | "custom";
@@ -95,11 +95,18 @@ function bytesForSize(size: string, customKb: number): number {
   return Math.max(1, customKb * 1024);
 }
 
+function maxRuntimePacketIdFromEvents(events: RdtEvent[]): number {
+  return events.reduce((maxPacketId, event) => {
+    if (event.packetId == null || event.type === "PACKET_CREATED") return maxPacketId;
+    return Math.max(maxPacketId, event.packetId);
+  }, 0);
+}
+
 function useTicker(active: boolean): number {
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
     if (!active) return;
-    const timer = window.setInterval(() => setNow(Date.now()), 500);
+    const timer = window.setInterval(() => setNow(Date.now()), 100);
     return () => window.clearInterval(timer);
   }, [active]);
   return now;
@@ -135,6 +142,7 @@ export function RdtDashboard({ initialRunId }: { initialRunId?: string }) {
   const [files, setFiles] = useState<FileItem[]>([]);
   const [run, setRun] = useState<RunRecord | null>(null);
   const [events, setEvents] = useState<RdtEvent[]>([]);
+  const [maxRuntimePacketId, setMaxRuntimePacketId] = useState(0);
   const [selectedPacketId, setSelectedPacketId] = useState(0);
   const [packetJump, setPacketJump] = useState("0");
   const [paused, setPaused] = useState(false);
@@ -166,6 +174,9 @@ export function RdtDashboard({ initialRunId }: { initialRunId?: string }) {
   const [windowSize, setWindowSize] = useState(4);
   const [customWindowSize, setCustomWindowSize] = useState(12);
   const currentRunIdRef = useRef<string | null>(initialRunId ?? null);
+  const eventIdsRef = useRef(new Set<number>());
+  const pausedRef = useRef(paused);
+  const startingRef = useRef(starting);
   const now = useTicker(run?.status === "running" && !paused);
   const statsNow = paused && pausedAt ? pausedAt : now;
   const isRunning = run?.status === "running";
@@ -182,10 +193,31 @@ export function RdtDashboard({ initialRunId }: { initialRunId?: string }) {
     if (!response.ok) return;
     const data = (await response.json()) as { run: RunRecord; events: RdtEvent[] };
     currentRunIdRef.current = data.run.id;
+    eventIdsRef.current = new Set(data.events.map((event) => event.id).filter((id): id is number => id != null));
     setRun(data.run);
     setEvents(data.events);
-    if (!paused) setVisibleEvents(data.events);
-  }, [paused]);
+    setMaxRuntimePacketId(maxRuntimePacketIdFromEvents(data.events));
+    if (!pausedRef.current) setVisibleEvents(data.events);
+  }, []);
+
+  const appendSocketEvents = useCallback((incomingEvents: RdtEvent[]) => {
+    const nextEvents: RdtEvent[] = [];
+    let nextMaxPacketId: number | null = null;
+    for (const event of incomingEvents) {
+      if (event.id != null) {
+        if (eventIdsRef.current.has(event.id)) continue;
+        eventIdsRef.current.add(event.id);
+      }
+      nextEvents.push(event);
+      if (event.packetId != null && event.type !== "PACKET_CREATED") {
+        nextMaxPacketId = Math.max(nextMaxPacketId ?? 0, event.packetId);
+      }
+    }
+    if (!nextEvents.length) return;
+    if (nextMaxPacketId != null) setMaxRuntimePacketId((current) => Math.max(current, nextMaxPacketId));
+    setEvents((current) => [...current, ...nextEvents]);
+    if (!pausedRef.current) setVisibleEvents((current) => [...current, ...nextEvents]);
+  }, []);
 
   useEffect(() => {
     void loadFiles();
@@ -196,26 +228,35 @@ export function RdtDashboard({ initialRunId }: { initialRunId?: string }) {
   }, [initialRunId, loadRun]);
 
   useEffect(() => {
+    pausedRef.current = paused;
+  }, [paused]);
+
+  useEffect(() => {
+    startingRef.current = starting;
+  }, [starting]);
+
+  useEffect(() => {
     const protocol = window.location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(`${protocol}://${window.location.host}/ws`);
     ws.onmessage = (message) => {
       const data = JSON.parse(message.data) as SocketMessage;
+      if (data.type === "run-started" && startingRef.current && !currentRunIdRef.current) {
+        currentRunIdRef.current = data.runId;
+      }
       if (data.type === "event") {
         const activeRunId = currentRunIdRef.current;
-        if (activeRunId && data.event.runId !== activeRunId) return;
-        setEvents((current) => (data.event.id && current.some((event) => event.id === data.event.id) ? current : [...current, data.event]));
-        if (!paused) setVisibleEvents((current) => (data.event.id && current.some((event) => event.id === data.event.id) ? current : [...current, data.event]));
+        if (!activeRunId || data.event.runId !== activeRunId) return;
+        appendSocketEvents([data.event]);
+      }
+      if (data.type === "events") {
+        const activeRunId = currentRunIdRef.current;
+        if (!activeRunId) return;
+        appendSocketEvents(data.events.filter((event) => event.runId === activeRunId));
       }
       if (data.type === "run-finished" && currentRunIdRef.current === data.runId) void loadRun(data.runId);
     };
     return () => ws.close();
-  }, [loadRun, paused]);
-
-  useEffect(() => {
-    if (!run || run.status !== "running") return;
-    const timer = window.setInterval(() => void loadRun(run.id), 1000);
-    return () => window.clearInterval(timer);
-  }, [loadRun, run]);
+  }, [appendSocketEvents, loadRun]);
 
   useEffect(() => {
     setPacketJump(String(selectedPacketId));
@@ -335,10 +376,12 @@ export function RdtDashboard({ initialRunId }: { initialRunId?: string }) {
     if (starting || stopping || isRunning) return;
     setStarting(true);
     currentRunIdRef.current = null;
+    eventIdsRef.current = new Set();
     setRun(null);
     setPaused(false);
     setPausedAt(null);
     setEvents([]);
+    setMaxRuntimePacketId(0);
     setVisibleEvents([]);
     setClearedLogAt(0);
     setSaveStatus("");
@@ -365,7 +408,7 @@ export function RdtDashboard({ initialRunId }: { initialRunId?: string }) {
       corruptionRate: corruption / 100,
       artificialDelayMs: delay + Math.floor(rtt / 2) + Math.floor(jitter / 2),
       timeoutMs: hasReliability ? timeoutMs : 0,
-      demoMode: hasReliability ? slowMode : false,
+      demoMode: slowMode,
       windowSize: effectiveWindowSize
     };
     try {
@@ -413,8 +456,10 @@ export function RdtDashboard({ initialRunId }: { initialRunId?: string }) {
       if (response.ok) {
         const data = (await response.json()) as { run: RunRecord; events: RdtEvent[] };
         currentRunIdRef.current = data.run.id;
+        eventIdsRef.current = new Set(data.events.map((event) => event.id).filter((id): id is number => id != null));
         setRun(data.run);
         setEvents(data.events);
+        setMaxRuntimePacketId(maxRuntimePacketIdFromEvents(data.events));
         setVisibleEvents(data.events);
         if (data.run.status !== "running") return;
       }
@@ -432,8 +477,10 @@ export function RdtDashboard({ initialRunId }: { initialRunId?: string }) {
       return;
     }
     const data = (await response.json()) as { run: RunRecord; events: RdtEvent[] };
+    eventIdsRef.current = new Set(data.events.map((event) => event.id).filter((id): id is number => id != null));
     setRun(data.run);
     setEvents(data.events);
+    setMaxRuntimePacketId(maxRuntimePacketIdFromEvents(data.events));
     if (!paused) setVisibleEvents(data.events);
     setSaveStatus(`Salvo no banco às ${formatClock(data.run.savedAt)}`);
   }
@@ -449,10 +496,12 @@ export function RdtDashboard({ initialRunId }: { initialRunId?: string }) {
       }
     }
     currentRunIdRef.current = null;
+    eventIdsRef.current = new Set();
     setRun(null);
     setPaused(false);
     setPausedAt(null);
     setEvents([]);
+    setMaxRuntimePacketId(0);
     setVisibleEvents([]);
     setClearedLogAt(0);
     setSaveStatus("");
@@ -558,15 +607,11 @@ export function RdtDashboard({ initialRunId }: { initialRunId?: string }) {
             </div>
           ) : null}
 
-          {hasReliability ? (
-            <>
-              <div className="config-divider" />
-              <h3 className="config-subtitle">Execução</h3>
-              <NumberField label="Timeout do cliente" value={timeoutMs} setValue={setTimeoutMs} suffix="ms" min={100} max={10000} step={100} />
-              <Toggle label="Modo lento" checked={slowMode} setChecked={setSlowMode} />
-              <Toggle label="Play automático" checked={autoPlay} setChecked={setAutoPlay} />
-            </>
-          ) : null}
+          <div className="config-divider" />
+          <h3 className="config-subtitle">Execução</h3>
+          {hasReliability ? <NumberField label="Timeout do cliente" value={timeoutMs} setValue={setTimeoutMs} suffix="ms" min={100} max={10000} step={100} /> : null}
+          <Toggle label="Modo lento" checked={slowMode} setChecked={setSlowMode} />
+          {hasReliability ? <Toggle label="Play automático" checked={autoPlay} setChecked={setAutoPlay} /> : null}
         </Card>
 
         <Card title="Canal não confiável (simulação)">
@@ -604,7 +649,7 @@ export function RdtDashboard({ initialRunId }: { initialRunId?: string }) {
               <span key={state}><i className={`dot ${state}`} />{stateLabel[state]}</span>
             ))}
           </div>
-          <PacketGrid packets={packets} selectedPacketId={selectedPacketId} setSelectedPacketId={selectPacket} />
+          <PacketGrid packets={packets} currentPacketId={maxRuntimePacketId} selectedPacketId={selectedPacketId} setSelectedPacketId={selectPacket} />
           <div className="packet-nav">
             <span>Clique em um pacote para ver os detalhes.</span>
             <form onSubmit={(event) => {
@@ -790,12 +835,12 @@ function MetricCard({ title, lines, hero, progress }: { title: string; lines: st
   );
 }
 
-function PacketGrid({ packets, selectedPacketId, setSelectedPacketId }: { packets: Array<{ packetId: number; state: PacketState; events: RdtEvent[] }>; selectedPacketId: number; setSelectedPacketId: (id: number) => void }) {
+function PacketGrid({ packets, currentPacketId, selectedPacketId, setSelectedPacketId }: { packets: Array<{ packetId: number; state: PacketState; events: RdtEvent[] }>; currentPacketId: number; selectedPacketId: number; setSelectedPacketId: (id: number) => void }) {
   const columns = usePacketGridColumns();
   const rowsPerPage = 3;
   const pageSize = columns * rowsPerPage;
   const [pageIndex, setPageIndex] = useState(0);
-  const latest = [...packets].reverse().find((packet) => packet.events.length > 0)?.packetId ?? 0;
+  const latest = Math.min(Math.max(0, currentPacketId), Math.max(0, packets.length - 1));
   const pageCount = Math.max(1, Math.ceil(packets.length / pageSize));
   const firstVisibleRow = pageIndex * rowsPerPage + 1;
   const lastVisibleRow = Math.min(Math.ceil(packets.length / columns), firstVisibleRow + rowsPerPage - 1);

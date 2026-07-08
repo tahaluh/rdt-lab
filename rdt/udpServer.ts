@@ -188,8 +188,6 @@ export class RdtUdpServer {
   }
 
   private async handleSelectiveRepeat(packet: RdtPacket, rinfo: RemoteInfo): Promise<void> {
-    const receiverWindowSize = Math.max(1, this.config.windowSize);
-    const windowEnd = this.expectedPacketId + receiverWindowSize - 1;
     if (packet.packetId < this.expectedPacketId || this.receivedPacketIds.has(packet.packetId)) {
       eventBus.emitRdt({
         runId: this.runId,
@@ -200,19 +198,6 @@ export class RdtUdpServer {
         message: `[SERVER] Packet ${packet.packetId} duplicate; ACK resent`
       });
       await this.sendAck(packet, rinfo);
-      return;
-    }
-
-    if (packet.packetId > windowEnd) {
-      eventBus.emitRdt({
-        runId: this.runId,
-        protocol: this.config.protocol,
-        packetId: packet.packetId,
-        seq: packet.seq,
-        type: "DUPLICATE_RECEIVED",
-        message: `[SERVER] Packet ${packet.packetId} outside Selective Repeat window ${this.expectedPacketId}-${windowEnd}`,
-        metadata: { expectedPacketId: this.expectedPacketId, windowEnd, windowSize: receiverWindowSize }
-      });
       return;
     }
 
