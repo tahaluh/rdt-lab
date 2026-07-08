@@ -5,13 +5,17 @@ import { decodeMessage, encodeMessage, verifyAck } from "./packet";
 export class RdtUdpClient {
   private socket = dgram.createSocket("udp4");
   private closed = false;
-  private ackWaiters = new Set<(ack: RdtAck) => void>();
+  private pendingAcks: RdtAck[] = [];
+  private ackWaiters = new Set<(ack: RdtAck) => boolean>();
 
   async start(): Promise<void> {
     this.socket.on("message", (message) => {
       const decoded = decodeMessage(message);
       if (!decoded || decoded.kind !== "ACK" || !verifyAck(decoded)) return;
-      for (const resolve of this.ackWaiters) resolve(decoded);
+      for (const resolve of this.ackWaiters) {
+        if (resolve(decoded)) return;
+      }
+      this.pendingAcks.push(decoded);
     });
     await new Promise<void>((resolve) => this.socket.bind(0, "127.0.0.1", resolve));
   }
@@ -29,17 +33,32 @@ export class RdtUdpClient {
   }
 
   waitForAck(packetId: number, seq: 0 | 1, timeoutMs: number, signal?: AbortSignal): Promise<RdtAck | null> {
+    return this.waitForAckMatching((ack) => ack.packetId === packetId && ack.seq === seq, timeoutMs, signal);
+  }
+
+  waitForAnyAck(timeoutMs: number, signal?: AbortSignal): Promise<RdtAck | null> {
+    return this.waitForAckMatching(() => true, timeoutMs, signal);
+  }
+
+  private waitForAckMatching(matches: (ack: RdtAck) => boolean, timeoutMs: number, signal?: AbortSignal): Promise<RdtAck | null> {
     return new Promise((resolve) => {
       if (signal?.aborted) {
         resolve(null);
         return;
       }
+      const pendingIndex = this.pendingAcks.findIndex(matches);
+      if (pendingIndex >= 0) {
+        const [ack] = this.pendingAcks.splice(pendingIndex, 1);
+        resolve(ack);
+        return;
+      }
       const onAck = (ack: RdtAck) => {
-        if (ack.packetId !== packetId || ack.seq !== seq) return;
+        if (!matches(ack)) return false;
         clearTimeout(timer);
         signal?.removeEventListener("abort", onAbort);
         this.ackWaiters.delete(onAck);
         resolve(ack);
+        return true;
       };
       const onAbort = () => {
         clearTimeout(timer);

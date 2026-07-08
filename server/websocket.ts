@@ -2,7 +2,7 @@ import { EventEmitter } from "node:events";
 import type { Server as HttpServer } from "node:http";
 import { WebSocketServer, WebSocket } from "ws";
 import { saveEvent } from "./db";
-import type { RdtEvent } from "../rdt/events";
+import type { Protocol, RdtEvent } from "../rdt/events";
 
 type SocketMessage =
   | { type: "event"; event: RdtEvent }
@@ -10,9 +10,9 @@ type SocketMessage =
   | { type: "run-finished"; runId: string };
 
 class RdtEventBus extends EventEmitter {
-  emitRdt(event: Omit<RdtEvent, "timestamp" | "protocol"> & { timestamp?: number; protocol?: "STOP_AND_WAIT" }): RdtEvent {
+  emitRdt(event: Omit<RdtEvent, "timestamp" | "protocol"> & { timestamp?: number; protocol?: Protocol }): RdtEvent {
     const enriched = saveEvent({
-      protocol: "STOP_AND_WAIT",
+      protocol: event.protocol ?? "STOP_AND_WAIT",
       timestamp: Date.now(),
       ...event
     });

@@ -1,50 +1,157 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { PanelRightOpen } from "lucide-react";
-import { ComparisonPanel } from "./ComparisonPanel";
-import { DemoControls } from "./DemoControls";
-import { EventLog } from "./EventLog";
-import { GlobalTimeline } from "./GlobalTimeline";
-import { LabTopBar } from "./LabTopBar";
-import { PacketGrid } from "./PacketGrid";
-import { PacketTimeline } from "./PacketTimeline";
-import { StatsPanel } from "./StatsPanel";
-import { TransmissionChart } from "./TransmissionChart";
-import { TransmissionMap } from "./TransmissionMap";
-import { buildPackets, buildStats } from "./rdtViewModel";
-import type { RdtEvent, RunConfig, RunRecord } from "@/rdt/events";
+import type { ReactNode } from "react";
+import { Pause, Play, RotateCcw, Save, Square, UploadCloud } from "lucide-react";
+import type { PacketState, RdtEvent, RunConfig, RunRecord } from "@/rdt/events";
 
+type FileItem = { name: string; size: number };
 type SocketMessage = { type: "event"; event: RdtEvent } | { type: "run-started"; runId: string } | { type: "run-finished"; runId: string };
+type SourceMode = "upload" | "text" | "random" | "packets";
+type LabProtocol = "UDP" | "STOP_AND_WAIT" | "GO_BACK_N" | "SELECTIVE_REPEAT";
+type WindowMode = "preset" | "custom";
+
+const payloadOptions = [256, 512, 1024, 1400, 4096];
+const windowOptions = [1, 4, 8, 16, 32, 64];
+const protocolLabels: Record<LabProtocol, string> = {
+  UDP: "UDP puro",
+  STOP_AND_WAIT: "Stop-and-Wait",
+  GO_BACK_N: "Go-Back-N",
+  SELECTIVE_REPEAT: "Selective Repeat"
+};
+
+const stateLabel: Record<PacketState, string> = {
+  pending: "Pendente",
+  created: "Criado",
+  sent: "Enviado",
+  received: "Recebido",
+  acknowledged: "Confirmado",
+  lost: "Perdido",
+  corrupted: "Corrompido",
+  timeout: "Timeout",
+  retransmitted: "Retransmitido",
+  duplicated: "Duplicado"
+};
+
+function stateFromEvents(events: RdtEvent[]): PacketState {
+  if (events.some((event) => event.type === "ACK_RECEIVED")) return "acknowledged";
+  if (events.some((event) => event.type === "PACKET_WRITTEN")) return "received";
+  if (events.some((event) => event.type === "DUPLICATE_RECEIVED")) return "duplicated";
+  if (events.some((event) => event.type === "PACKET_RECEIVED")) return "received";
+  if (events.some((event) => event.type === "PACKET_CORRUPTED")) return "corrupted";
+  if (events.some((event) => event.type === "PACKET_LOST" || event.type === "ACK_LOST")) return "lost";
+  if (events.some((event) => event.type === "RETRANSMISSION")) return "retransmitted";
+  if (events.some((event) => event.type === "TIMEOUT")) return "timeout";
+  if (events.some((event) => event.type === "PACKET_SENT")) return "sent";
+  if (events.some((event) => event.type === "PACKET_CREATED")) return "created";
+  return "pending";
+}
+
+function origin(event: RdtEvent): "CLIENT" | "SERVER" | "CHANNEL" | "SYSTEM" {
+  if (event.message.includes("[CLIENT]")) return "CLIENT";
+  if (event.message.includes("[SERVER]")) return "SERVER";
+  if (event.message.includes("[CHANNEL]")) return "CHANNEL";
+  return "SYSTEM";
+}
+
+function shortHash(hash?: string): string {
+  return hash ? `${hash.slice(0, 4)}...${hash.slice(-4)}` : "-";
+}
+
+function formatClock(timestamp?: number): string {
+  if (!timestamp) return "-";
+  return new Date(timestamp).toLocaleTimeString("pt-BR", { hour12: false, fractionalSecondDigits: 3 });
+}
+
+function formatLogDate(timestamp?: number): string {
+  if (!timestamp) return "-";
+  return new Date(timestamp).toLocaleString("pt-BR", {
+    day: "2-digit",
+    month: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    fractionalSecondDigits: 3,
+    hour12: false
+  });
+}
+
+function logNumber(event: RdtEvent, fallbackIndex: number): string {
+  return `#${event.id ?? fallbackIndex + 1}`;
+}
+
+function formatElapsed(ms: number): string {
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  return `${Math.floor(seconds / 60).toString().padStart(2, "0")}:${(seconds % 60).toString().padStart(2, "0")}`;
+}
+
+function bytesForSize(size: string, customKb: number): number {
+  if (size === "10kb") return 10 * 1024;
+  if (size === "100kb") return 100 * 1024;
+  if (size === "1mb") return 1024 * 1024;
+  if (size === "10mb") return 10 * 1024 * 1024;
+  return Math.max(1, customKb * 1024);
+}
+
+function useTicker(active: boolean): number {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    if (!active) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 500);
+    return () => window.clearInterval(timer);
+  }, [active]);
+  return now;
+}
+
+async function readJson<T>(response: Response): Promise<T | null> {
+  const text = await response.text();
+  if (!text.trim()) return null;
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw new Error(text);
+  }
+}
 
 export function RdtDashboard({ initialRunId }: { initialRunId?: string }) {
-  const [files, setFiles] = useState<Array<{ name: string; size: number }>>([]);
-  const [runs, setRuns] = useState<RunRecord[]>([]);
+  const [files, setFiles] = useState<FileItem[]>([]);
   const [run, setRun] = useState<RunRecord | null>(null);
   const [events, setEvents] = useState<RdtEvent[]>([]);
-  const [busy, setBusy] = useState(false);
-  const [selectedPacketId, setSelectedPacketId] = useState<number | null>(null);
-  const [theme, setTheme] = useState<"light" | "dark">("light");
-  const [timelineOpen, setTimelineOpen] = useState(true);
-  const [livePaused, setLivePaused] = useState(false);
-  const [frozenEvents, setFrozenEvents] = useState<RdtEvent[]>([]);
-  const [replaying, setReplaying] = useState(false);
-  const [replayPaused, setReplayPaused] = useState(false);
-  const [replayIndex, setReplayIndex] = useState(0);
-  const [replaySpeed, setReplaySpeed] = useState(1);
-  const [compareSelection, setCompareSelection] = useState<string[]>([]);
+  const [selectedPacketId, setSelectedPacketId] = useState(0);
+  const [packetJump, setPacketJump] = useState("0");
+  const [paused, setPaused] = useState(false);
+  const [visibleEvents, setVisibleEvents] = useState<RdtEvent[]>([]);
+  const [clearedLogAt, setClearedLogAt] = useState(0);
+  const [saveStatus, setSaveStatus] = useState("");
+
+  const [sourceMode, setSourceMode] = useState<SourceMode>("random");
+  const [selectedFile, setSelectedFile] = useState("");
+  const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const [sizePreset, setSizePreset] = useState("100kb");
+  const [customKb, setCustomKb] = useState(256);
+  const [packetCount, setPacketCount] = useState(128);
+  const [labProtocol, setLabProtocol] = useState<LabProtocol>("STOP_AND_WAIT");
+  const [payloadSize, setPayloadSize] = useState(512);
+  const [packetLoss, setPacketLoss] = useState(10);
+  const [ackLoss, setAckLoss] = useState(5);
+  const [corruption, setCorruption] = useState(2);
+  const [delay, setDelay] = useState(120);
+  const [jitter, setJitter] = useState(30);
+  const [rtt, setRtt] = useState(60);
+  const [timeoutMs, setTimeoutMs] = useState(1000);
+  const [slowMode, setSlowMode] = useState(false);
+  const [autoPlay, setAutoPlay] = useState(true);
+  const [windowMode, setWindowMode] = useState<WindowMode>("preset");
+  const [windowSize, setWindowSize] = useState(4);
+  const [customWindowSize, setCustomWindowSize] = useState(12);
   const currentRunIdRef = useRef<string | null>(initialRunId ?? null);
+  const now = useTicker(run?.status === "running");
 
   const loadFiles = useCallback(async () => {
     const response = await fetch("/api/files", { cache: "no-store" });
-    const data = (await response.json()) as { files: Array<{ name: string; size: number }> };
+    const data = (await response.json()) as { files: FileItem[] };
     setFiles(data.files);
-  }, []);
-
-  const loadRuns = useCallback(async () => {
-    const response = await fetch("/api/runs", { cache: "no-store" });
-    const data = (await response.json()) as { runs: RunRecord[] };
-    setRuns(data.runs);
+    setSelectedFile((current) => current || data.files[0]?.name || "");
   }, []);
 
   const loadRun = useCallback(async (runId: string) => {
@@ -54,28 +161,16 @@ export function RdtDashboard({ initialRunId }: { initialRunId?: string }) {
     currentRunIdRef.current = data.run.id;
     setRun(data.run);
     setEvents(data.events);
-    setBusy(data.run.status === "running");
-    void loadRuns();
-  }, [loadRuns]);
+    if (!paused) setVisibleEvents(data.events);
+  }, [paused]);
 
   useEffect(() => {
     void loadFiles();
-    void loadRuns();
-  }, [loadFiles, loadRuns]);
+  }, [loadFiles]);
 
   useEffect(() => {
     if (initialRunId) void loadRun(initialRunId);
   }, [initialRunId, loadRun]);
-
-  useEffect(() => {
-    const storedTheme = window.localStorage.getItem("rdt-theme");
-    if (storedTheme === "dark" || storedTheme === "light") setTheme(storedTheme);
-  }, []);
-
-  useEffect(() => {
-    document.documentElement.dataset.theme = theme;
-    window.localStorage.setItem("rdt-theme", theme);
-  }, [theme]);
 
   useEffect(() => {
     const protocol = window.location.protocol === "https:" ? "wss" : "ws";
@@ -83,187 +178,594 @@ export function RdtDashboard({ initialRunId }: { initialRunId?: string }) {
     ws.onmessage = (message) => {
       const data = JSON.parse(message.data) as SocketMessage;
       if (data.type === "event") {
-        setEvents((current) => {
-          const currentRunId = currentRunIdRef.current;
-          if (currentRunId && data.event.runId !== currentRunId) return current;
-          if (!currentRunId && initialRunId && data.event.runId !== initialRunId) return current;
-          if (data.event.id && current.some((event) => event.id === data.event.id)) return current;
-          return [...current, data.event];
-        });
+        const activeRunId = currentRunIdRef.current;
+        if (activeRunId && data.event.runId !== activeRunId) return;
+        setEvents((current) => (data.event.id && current.some((event) => event.id === data.event.id) ? current : [...current, data.event]));
+        if (!paused) setVisibleEvents((current) => (data.event.id && current.some((event) => event.id === data.event.id) ? current : [...current, data.event]));
       }
-      if (data.type === "run-finished") {
-        if (currentRunIdRef.current && data.runId !== currentRunIdRef.current) return;
-        setBusy(false);
-        void loadRun(data.runId);
-      }
+      if (data.type === "run-finished" && currentRunIdRef.current === data.runId) void loadRun(data.runId);
     };
     return () => ws.close();
-  }, [initialRunId, loadRun]);
+  }, [loadRun, paused]);
 
   useEffect(() => {
-    if (!busy || !run) return;
-    const timer = window.setInterval(() => void loadRun(run.id), 900);
+    if (!run || run.status !== "running") return;
+    const timer = window.setInterval(() => void loadRun(run.id), 1000);
     return () => window.clearInterval(timer);
-  }, [busy, loadRun, run]);
+  }, [loadRun, run]);
 
   useEffect(() => {
-    if (!replaying || replayPaused) return;
-    const timer = window.setInterval(() => {
-      setReplayIndex((index) => Math.min(events.length, index + Math.max(1, Math.floor(replaySpeed))));
-    }, Math.max(40, 220 / replaySpeed));
-    return () => window.clearInterval(timer);
-  }, [events.length, replayPaused, replaySpeed, replaying]);
+    setPacketJump(String(selectedPacketId));
+  }, [selectedPacketId]);
 
-  useEffect(() => {
-    if (replaying && replayIndex >= events.length) setReplayPaused(true);
-  }, [events.length, replayIndex, replaying]);
+  const currentEvents = paused ? visibleEvents : events;
+  const logEvents = currentEvents.filter((event) => event.timestamp > clearedLogAt);
+  const selectedFileSize = files.find((file) => file.name === selectedFile)?.size;
+  const effectivePacketCount = Math.min(50000, Math.max(1, Number.isFinite(packetCount) ? Math.floor(packetCount) : 1));
+  const configuredBytes = sourceMode === "upload"
+    ? uploadFile?.size ?? selectedFileSize ?? 1
+    : sourceMode === "packets"
+      ? effectivePacketCount * payloadSize
+      : bytesForSize(sizePreset, customKb);
+  const estimatedPackets = sourceMode === "packets" ? effectivePacketCount : Math.ceil(configuredBytes / payloadSize) || 1;
+  const runTotalPackets = run ? Math.ceil(run.fileSize / run.payloadSize) || 1 : estimatedPackets;
+  const activeProtocol = run?.protocol ?? labProtocol;
+  const hasReliability = labProtocol !== "UDP";
+  const hasSlidingWindow = labProtocol === "GO_BACK_N" || labProtocol === "SELECTIVE_REPEAT";
+  const effectiveWindowSize = hasSlidingWindow ? (windowMode === "custom" ? customWindowSize : windowSize) : labProtocol === "STOP_AND_WAIT" ? 1 : 0;
 
-  const start = async (config: RunConfig) => {
-    setBusy(true);
+  const packets = useMemo(() => {
+    const grouped = new Map<number, RdtEvent[]>();
+    for (const event of currentEvents) {
+      if (event.packetId == null) continue;
+      grouped.set(event.packetId, [...(grouped.get(event.packetId) ?? []), event]);
+    }
+    return Array.from({ length: runTotalPackets }, (_, packetId) => {
+      const packetEvents = grouped.get(packetId) ?? [];
+      const state = stateFromEvents(packetEvents);
+      return { packetId, state, events: packetEvents };
+    });
+  }, [currentEvents, runTotalPackets]);
+
+  const stats = useMemo(() => {
+    const packetsSent = currentEvents.filter((event) => event.type === "PACKET_SENT").length;
+    const packetsWritten = currentEvents.filter((event) => event.type === "PACKET_WRITTEN").length;
+    const confirmed = activeProtocol === "UDP" ? packetsWritten : currentEvents.filter((event) => event.type === "ACK_RECEIVED").length;
+    const packetLost = currentEvents.filter((event) => event.type === "PACKET_LOST").length;
+    const ackLost = currentEvents.filter((event) => event.type === "ACK_LOST").length;
+    const corrupted = currentEvents.filter((event) => event.type === "PACKET_CORRUPTED").length;
+    const retransmissions = currentEvents.filter((event) => event.type === "RETRANSMISSION").length;
+    const duplicates = currentEvents.filter((event) => event.type === "DUPLICATE_RECEIVED").length;
+    const rtts = currentEvents
+      .map((event) => (typeof event.metadata?.rttMs === "number" ? event.metadata.rttMs : null))
+      .filter((value): value is number => value != null);
+    const elapsedMs = run ? (run.finishedAt ?? now) - run.startedAt : 0;
+    const usefulThroughput = run && elapsedMs > 0 ? Math.min(run.fileSize, confirmed * run.payloadSize) / (elapsedMs / 1000) : 0;
+    const grossThroughput = run && elapsedMs > 0 ? packetsSent * run.payloadSize / (elapsedMs / 1000) : 0;
+    return {
+      packetsSent,
+      packetsWritten,
+      confirmed,
+      packetLost,
+      ackLost,
+      corrupted,
+      retransmissions,
+      duplicates,
+      elapsedMs,
+      usefulThroughput,
+      grossThroughput,
+      avgRtt: rtts.length ? rtts.reduce((sum, value) => sum + value, 0) / rtts.length : 0,
+      efficiency: packetsSent > 0 ? (confirmed / packetsSent) * 100 : 0,
+      progress: runTotalPackets > 0 ? Math.min(100, (confirmed / runTotalPackets) * 100) : 0
+    };
+  }, [activeProtocol, currentEvents, now, run, runTotalPackets]);
+
+  const selectedPacket = packets[selectedPacketId] ?? packets[0];
+  const latestSeq = [...currentEvents].reverse().find((event) => event.seq != null)?.seq;
+  const seqCurrent = latestSeq ?? ((stats.confirmed % 2) as 0 | 1);
+  const etaMs = stats.progress > 0 && stats.progress < 100 ? stats.elapsedMs * ((100 - stats.progress) / stats.progress) : 0;
+
+  async function resolveFileName(): Promise<string> {
+    if (sourceMode === "upload") {
+      if (uploadFile) {
+        const form = new FormData();
+        form.set("file", uploadFile);
+        const response = await fetch("/api/files/upload", { method: "POST", body: form });
+        const data = await readJson<{ file: FileItem; error?: string }>(response);
+        if (!response.ok || !data?.file) throw new Error(data?.error ?? "Falha ao enviar arquivo");
+        await loadFiles();
+        return data.file.name;
+      }
+      return selectedFile || files[0]?.name || "";
+    }
+    const bytes = sourceMode === "packets" ? effectivePacketCount * payloadSize : bytesForSize(sizePreset, customKb);
+    const packetsToGenerate = sourceMode === "packets" ? effectivePacketCount : Math.max(1, Math.ceil(bytes / payloadSize));
+    const response = await fetch("/api/files/generate", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        mode: sourceMode === "packets" ? "packets" : sourceMode,
+        fileName: `${sourceMode}-demo.txt`,
+        bytes,
+        packets: packetsToGenerate,
+        payloadSize,
+        text: "RDT Lab generated text payload for reliable data transfer over UDP.\n"
+      })
+    });
+    const data = await readJson<{ file: FileItem; error?: string }>(response);
+    if (!response.ok || !data?.file) throw new Error(data?.error ?? "Falha ao gerar arquivo");
+    await loadFiles();
+    return data.file.name;
+  }
+
+  async function startRun() {
+    let fileName = "";
+    try {
+      fileName = await resolveFileName();
+    } catch (error) {
+      setSaveStatus(`Erro ao preparar arquivo: ${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
+    if (!fileName) {
+      setSaveStatus("Escolha ou gere um arquivo antes de iniciar");
+      return;
+    }
+    const config: RunConfig = {
+      protocol: labProtocol,
+      fileName,
+      payloadSize,
+      packetLossRate: packetLoss / 100,
+      ackLossRate: hasReliability ? ackLoss / 100 : 0,
+      corruptionRate: corruption / 100,
+      artificialDelayMs: delay + Math.floor(rtt / 2) + Math.floor(jitter / 2),
+      timeoutMs: hasReliability ? timeoutMs : 0,
+      demoMode: hasReliability ? slowMode : false,
+      windowSize: effectiveWindowSize
+    };
+    setPaused(false);
     setEvents([]);
-    setFrozenEvents([]);
-    setLivePaused(false);
-    setReplaying(false);
-    setReplayIndex(0);
-    setSelectedPacketId(null);
-    setTimelineOpen(true);
+    setVisibleEvents([]);
+    setClearedLogAt(0);
+    setSaveStatus("");
+    setSelectedPacketId(0);
     const response = await fetch("/api/runs", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(config)
     });
-    const data = (await response.json()) as { run?: RunRecord; error?: string };
-    if (!response.ok || !data.run) {
-      setBusy(false);
-      throw new Error(data.error ?? "Falha ao iniciar transmissão");
+    let data: { run?: RunRecord; error?: string } | null = null;
+    try {
+      data = await readJson<{ run?: RunRecord; error?: string }>(response);
+    } catch (error) {
+      setSaveStatus(`Erro ao iniciar: ${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
+    if (!response.ok || !data?.run) {
+      setSaveStatus(`Erro ao iniciar: ${data?.error ?? (response.statusText || "resposta inválida")}`);
+      return;
     }
     currentRunIdRef.current = data.run.id;
     setRun(data.run);
-    void loadRun(data.run.id);
     window.history.replaceState(null, "", `/runs/${data.run.id}`);
-  };
+  }
 
-  const stop = async () => {
-    if (!run || run.status !== "running") return;
+  async function stopRun() {
+    if (!run) return;
     await fetch(`/api/runs/${run.id}/stop`, { method: "POST" });
-    setBusy(false);
-    void loadRun(run.id);
-  };
+    await loadRun(run.id);
+  }
 
-  const displayEvents = replaying ? events.slice(0, replayIndex) : livePaused ? frozenEvents : events;
-  const packets = useMemo(() => buildPackets(run, displayEvents), [run, displayEvents]);
-  const stats = useMemo(() => buildStats(run, displayEvents), [run, displayEvents]);
-  const selectedPacket = packets.find((packet) => packet.packetId === selectedPacketId) ?? packets[0] ?? null;
-
-  const togglePause = () => {
-    if (replaying) {
-      setReplayPaused((value) => !value);
+  async function saveRun() {
+    if (!run) return;
+    setSaveStatus("Salvando...");
+    const response = await fetch(`/api/runs/${run.id}/save`, { method: "POST" });
+    if (!response.ok) {
+      setSaveStatus("Erro ao salvar");
       return;
     }
-    setLivePaused((value) => {
-      if (!value) setFrozenEvents(events);
-      return !value;
-    });
-  };
+    const data = (await response.json()) as { run: RunRecord; events: RdtEvent[] };
+    setRun(data.run);
+    setEvents(data.events);
+    if (!paused) setVisibleEvents(data.events);
+    setSaveStatus(`Salvo no banco às ${formatClock(data.run.savedAt)}`);
+  }
 
-  const startReplay = () => {
-    if (!run) return;
-    setReplaying(true);
-    setReplayPaused(false);
-    setReplayIndex(0);
-    setLivePaused(false);
-  };
+  function clearRound() {
+    currentRunIdRef.current = null;
+    setRun(null);
+    setEvents([]);
+    setVisibleEvents([]);
+    setClearedLogAt(0);
+    setSaveStatus("");
+    setSelectedPacketId(0);
+    window.history.replaceState(null, "", "/");
+  }
 
-  const saveRun = () => {
-    if (!run) return;
-    const blob = new Blob([JSON.stringify({ run, events }, null, 2)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `rdt-run-${run.id}.json`;
-    link.click();
-    URL.revokeObjectURL(url);
-  };
-
-  const openRun = (runId: string) => {
-    setReplaying(false);
-    setReplayIndex(0);
-    void loadRun(runId);
-    window.history.replaceState(null, "", `/runs/${runId}`);
-  };
-
-  const duplicateConfig = (source: RunRecord) => {
-    void start({
-      fileName: source.fileName,
-      payloadSize: source.payloadSize,
-      packetLossRate: source.packetLossRate,
-      ackLossRate: source.ackLossRate,
-      corruptionRate: source.corruptionRate,
-      artificialDelayMs: source.artificialDelayMs,
-      timeoutMs: source.timeoutMs,
-      demoMode: true
-    });
-  };
-
-  const toggleCompare = (runId: string) => {
-    setCompareSelection((current) => (current.includes(runId) ? current.filter((id) => id !== runId) : [...current.slice(-1), runId]));
-  };
+  function selectPacket(packetId: number) {
+    const next = Math.min(Math.max(0, packetId), Math.max(0, runTotalPackets - 1));
+    setSelectedPacketId(next);
+    setPacketJump(String(next));
+  }
 
   return (
-    <div className="app-shell">
-      <LabTopBar
-        run={run}
-        stats={stats}
-        theme={theme}
-        replaying={replaying}
-        paused={replaying ? replayPaused : livePaused}
-        onTheme={() => setTheme((value) => (value === "dark" ? "light" : "dark"))}
-        onStartReplay={startReplay}
-        onTogglePause={togglePause}
-        onStop={stop}
-        onSave={saveRun}
-      />
-
-      <main className="lab-layout">
-        <DemoControls files={files} busy={busy} onStart={start} onFilesChanged={loadFiles} />
-
-        <section className="region-grid stack">
-          <TransmissionMap run={run} packets={packets} stats={stats} />
-          <PacketGrid packets={packets} selectedPacketId={selectedPacket?.packetId ?? null} onSelect={setSelectedPacketId} />
-          <GlobalTimeline events={displayEvents} />
-        </section>
-
-        <StatsPanel run={run} stats={stats} />
-
-        <section className="timeline-shell">
-          {timelineOpen ? (
-            <PacketTimeline packet={selectedPacket} onClose={() => setTimelineOpen(false)} />
-          ) : (
-            <button className="reopen-timeline" type="button" onClick={() => setTimelineOpen(true)}>
-              <PanelRightOpen size={17} />
-              Abrir timeline do pacote
-            </button>
-          )}
-        </section>
-
-        <ComparisonPanel runs={runs} selected={compareSelection} onToggle={toggleCompare} onOpen={openRun} onDuplicate={duplicateConfig} />
-        <EventLog events={displayEvents} />
-        <TransmissionChart run={run} events={displayEvents} />
-
-        {replaying ? (
-          <div className="replay-bar">
-            <button type="button" onClick={() => setReplayIndex((value) => Math.max(0, value - 10))}>{"<<"}</button>
-            <button type="button" onClick={() => setReplayPaused((value) => !value)}>{replayPaused ? "▶" : "⏸"}</button>
-            <button type="button" onClick={() => setReplayIndex((value) => Math.min(events.length, value + 10))}>{">>"}</button>
-            {[0.5, 1, 2, 5].map((speed) => (
-              <button key={speed} type="button" className={replaySpeed === speed ? "active" : ""} onClick={() => setReplaySpeed(speed)}>
-                {speed}x
-              </button>
-            ))}
-            <span>{replayIndex}/{events.length} eventos</span>
+    <main className="rdt-screen">
+      <aside className="left-column">
+        <div className="brand-block">
+          <div className="brand-mark">RDT</div>
+          <div>
+            <h1>RDT Lab</h1>
+            <p>Reliable Data Transfer over UDP</p>
           </div>
-        ) : null}
-      </main>
+        </div>
+
+        <Card title="Configuração da transmissão">
+          <Field label="Fonte dos dados">
+            <select value={sourceMode} onChange={(event) => setSourceMode(event.target.value as SourceMode)}>
+              <option value="upload">Upload de arquivo</option>
+              <option value="text">Gerar texto</option>
+              <option value="random">Gerar bytes aleatórios</option>
+              <option value="packets">Gerar N pacotes</option>
+            </select>
+          </Field>
+          {sourceMode === "upload" ? (
+            <>
+              <label className="upload-control">
+                <UploadCloud size={16} />
+                <span>{uploadFile?.name || "Escolher arquivo"}</span>
+                <input type="file" onChange={(event) => setUploadFile(event.currentTarget.files?.[0] ?? null)} />
+              </label>
+              <Field label="Arquivo disponível">
+                <select value={selectedFile} onChange={(event) => setSelectedFile(event.target.value)}>
+                  {files.map((file) => (
+                    <option key={file.name} value={file.name}>{file.name}</option>
+                  ))}
+                </select>
+              </Field>
+            </>
+          ) : null}
+          {sourceMode !== "upload" && sourceMode !== "packets" ? (
+            <>
+              <Field label="Tamanho">
+                <select value={sizePreset} onChange={(event) => setSizePreset(event.target.value)}>
+                  <option value="10kb">10 KB</option>
+                  <option value="100kb">100 KB</option>
+                  <option value="1mb">1 MB</option>
+                  <option value="10mb">10 MB</option>
+                  <option value="custom">Personalizado</option>
+                </select>
+              </Field>
+              {sizePreset === "custom" ? <NumberField label="Tamanho customizado" value={customKb} setValue={setCustomKb} suffix="KB" min={1} max={102400} /> : null}
+            </>
+          ) : null}
+          {sourceMode === "packets" ? <NumberField label="Quantidade de pacotes" value={packetCount} setValue={setPacketCount} suffix="pacotes" min={1} max={50000} /> : null}
+          <Field label="Tamanho do pacote">
+            <select value={payloadSize} onChange={(event) => setPayloadSize(Number(event.target.value))}>
+              {payloadOptions.map((option) => <option key={option} value={option}>{option} B</option>)}
+            </select>
+          </Field>
+          <div className="estimate-box">
+            <span>Pacotes estimados</span>
+            <b>{estimatedPackets.toLocaleString("pt-BR")} pacotes</b>
+          </div>
+
+          <div className="config-divider" />
+          <h3 className="config-subtitle">Protocolo</h3>
+          <Field label="Protocolo">
+            <select value={labProtocol} onChange={(event) => setLabProtocol(event.target.value as LabProtocol)}>
+              <option value="UDP">UDP puro</option>
+              <option value="STOP_AND_WAIT">Stop-and-Wait</option>
+              <option value="GO_BACK_N">Go-Back-N</option>
+              <option value="SELECTIVE_REPEAT">Selective Repeat</option>
+            </select>
+          </Field>
+          {labProtocol === "STOP_AND_WAIT" ? <div className="protocol-note">Janela fixa: <b>1</b></div> : null}
+          {labProtocol === "GO_BACK_N" ? <div className="protocol-note">ACK cumulativo: <b>informativo</b></div> : null}
+          {hasSlidingWindow ? (
+            <div className="window-config">
+              <Field label="Janela">
+                <select value={windowMode === "custom" ? "custom" : String(windowSize)} onChange={(event) => {
+                  if (event.target.value === "custom") {
+                    setWindowMode("custom");
+                    return;
+                  }
+                  setWindowMode("preset");
+                  setWindowSize(Number(event.target.value));
+                }}>
+                  {windowOptions.map((option) => <option key={option} value={option}>{option}</option>)}
+                  <option value="custom">Personalizada</option>
+                </select>
+              </Field>
+              {windowMode === "custom" ? <NumberField label="Janela customizada" value={customWindowSize} setValue={setCustomWindowSize} suffix="pacotes" min={1} max={256} /> : null}
+            </div>
+          ) : null}
+
+          {hasReliability ? (
+            <>
+              <div className="config-divider" />
+              <h3 className="config-subtitle">Execução</h3>
+              <NumberField label="Timeout do cliente" value={timeoutMs} setValue={setTimeoutMs} suffix="ms" min={100} max={10000} step={100} />
+              <Toggle label="Modo lento" checked={slowMode} setChecked={setSlowMode} />
+              <Toggle label="Play automático" checked={autoPlay} setChecked={setAutoPlay} />
+            </>
+          ) : null}
+        </Card>
+
+        <Card title="Canal não confiável (simulação)">
+          <SliderField label="Perda de pacote" value={packetLoss} setValue={setPacketLoss} min={0} max={100} suffix="%" />
+          {hasReliability ? <SliderField label="Perda de ACK" value={ackLoss} setValue={setAckLoss} min={0} max={100} suffix="%" /> : null}
+          <SliderField label="Corrupção de pacote" value={corruption} setValue={setCorruption} min={0} max={100} suffix="%" />
+          <SliderField label="Delay artificial" value={delay} setValue={setDelay} min={0} max={2000} step={20} suffix="ms" />
+          <SliderField label="Jitter" value={jitter} setValue={setJitter} min={0} max={1000} step={10} suffix="ms" />
+          <SliderField label="RTT artificial" value={rtt} setValue={setRtt} min={0} max={2000} step={20} suffix="ms" />
+        </Card>
+
+        <Card title="Controles da rodada" className="round-controls-card">
+          <button className="primary-btn" onClick={() => void startRun()} type="button">
+            <Play size={16} />
+            Iniciar transmissão
+          </button>
+          <button className="secondary-btn" onClick={clearRound} type="button">
+            <RotateCcw size={16} />
+            Limpar / nova rodada
+          </button>
+        </Card>
+      </aside>
+
+      <section className="center-column">
+        <div className="summary-grid">
+          <MetricCard title="Rodada atual" lines={[`ID: ${run?.id.slice(0, 8) ?? "-"}`, `Arquivo: ${run?.fileName ?? "-"}`, `Início: ${formatClock(run?.startedAt)}`]} />
+          <MetricCard title="Protocolo" lines={[run ? protocolLabels[run.protocol as LabProtocol] ?? run.protocol : protocolLabels[labProtocol], `Status: ${run?.status ?? "idle"}`, hasSlidingWindow ? `Janela: ${effectiveWindowSize}` : `Seq atual: ${seqCurrent}`]} />
+          <MetricCard title="Tempo decorrido" hero={formatElapsed(stats.elapsedMs)} lines={[`ETA: ${etaMs > 0 ? formatElapsed(etaMs) : "-"}`]} />
+          <MetricCard title="Progresso" hero={`${stats.progress.toFixed(0)}%`} progress={stats.progress} lines={[`${stats.confirmed} / ${runTotalPackets} pacotes`]} />
+        </div>
+
+        <Card title="Visão geral dos pacotes" className="packet-overview">
+          <div className="legend-row">
+            {(["pending", "sent", "received", "acknowledged", "lost", "corrupted", "timeout", "retransmitted", "duplicated"] as PacketState[]).map((state) => (
+              <span key={state}><i className={`dot ${state}`} />{stateLabel[state]}</span>
+            ))}
+          </div>
+          <PacketGrid packets={packets} selectedPacketId={selectedPacketId} setSelectedPacketId={selectPacket} />
+          <div className="packet-nav">
+            <span>Clique em um pacote para ver os detalhes.</span>
+            <form onSubmit={(event) => {
+              event.preventDefault();
+              const value = Number(packetJump);
+              if (Number.isFinite(value)) selectPacket(value);
+            }}>
+              <label>Ir para o pacote</label>
+              <input name="packet" type="number" min={0} max={Math.max(0, runTotalPackets - 1)} value={packetJump} onChange={(event) => setPacketJump(event.target.value)} />
+              <button type="submit">Ir</button>
+            </form>
+          </div>
+        </Card>
+
+        <Card
+          title={`Detalhes do pacote ${selectedPacket?.packetId ?? 0}`}
+          className="packet-details"
+          action={(
+            <div className="detail-counters">
+              <span>Duplicado: <b>{selectedPacket?.events.filter((event) => event.type === "DUPLICATE_RECEIVED").length ?? 0}</b> vezes</span>
+              <span>Retransmissões: <b>{selectedPacket?.events.filter((event) => event.type === "RETRANSMISSION").length ?? 0}</b> vezes</span>
+              <span>Tentativas: <b>{selectedPacket?.events.filter((event) => event.type === "PACKET_SENT").length ?? 0}</b></span>
+            </div>
+          )}
+        >
+          <ol className="packet-timeline">
+            {(selectedPacket?.events ?? []).map((event, index) => (
+              <li className={event.type.toLowerCase()} key={event.id ?? `${event.timestamp}-${index}`}>
+                <b>{logNumber(event, index)}</b>
+                <time>{formatLogDate(event.timestamp)}</time>
+                <em>{origin(event)}</em>
+                <strong>{event.type.replaceAll("_", " ")}</strong>
+                <span>{event.message.replace(/^\[[^\]]+\]\s*/, "")}</span>
+              </li>
+            ))}
+            {!selectedPacket?.events.length ? <li className="empty-row">Nenhum evento para este pacote ainda.</li> : null}
+          </ol>
+        </Card>
+      </section>
+
+      <aside className="right-column">
+        <Card title="Ações rápidas" className="quick-actions-card">
+          <div className="quick-actions">
+            <button onClick={() => {
+              setPaused((value) => {
+                if (!value) setVisibleEvents(events);
+                return !value;
+              });
+            }} type="button">
+              <Pause size={15} /> Pausar
+            </button>
+            <button onClick={() => void stopRun()} disabled={run?.status !== "running"} type="button">
+              <Square size={15} /> Parar
+            </button>
+            <button onClick={() => void saveRun()} disabled={!run} type="button">
+              <Save size={15} /> Salvar rodada
+            </button>
+          </div>
+          {saveStatus ? <p className="save-status">{saveStatus}</p> : null}
+          <button className="full-btn" disabled={!run} type="button">Abrir replay</button>
+        </Card>
+
+        <Card title="Estatísticas da rodada" className="stats-card">
+          <StatLine label="Pacotes totais" value={runTotalPackets} />
+          <StatLine label="Pacotes enviados" value={stats.packetsSent} />
+          <StatLine label={activeProtocol === "UDP" ? "Pacotes recebidos" : "Pacotes confirmados"} value={stats.confirmed} />
+          <hr />
+          <StatLine label="Pacotes perdidos" value={stats.packetLost} />
+          <StatLine label="ACKs perdidos" value={stats.ackLost} />
+          <StatLine label="Pacotes corrompidos" value={stats.corrupted} />
+          <hr />
+          <StatLine label="Retransmissões" value={stats.retransmissions} />
+          <StatLine label="Duplicatas recebidas" value={stats.duplicates} />
+          <hr />
+          <StatLine label="Tempo total" value={`${formatElapsed(stats.elapsedMs)}`} />
+          <StatLine label="Throughput útil" value={`${stats.usefulThroughput.toFixed(1)} B/s`} />
+          <StatLine label="Throughput bruto" value={`${stats.grossThroughput.toFixed(1)} B/s`} />
+          <StatLine label="RTT médio estimado" value={`${stats.avgRtt.toFixed(1)} ms`} />
+          <StatLine label="Eficiência" value={`${stats.efficiency.toFixed(1)}%`} />
+        </Card>
+
+        <Card title="Integridade do arquivo">
+          <div className="hash-block">
+            <span>Hash original (SHA-256)</span>
+            <b>{shortHash(run?.originalHash)}</b>
+          </div>
+          <div className="hash-block">
+            <span>Hash recebido (SHA-256)</span>
+            <b>{shortHash(run?.receivedHash)}</b>
+          </div>
+          <div className={`integrity ${run?.receivedHash && run.originalHash === run.receivedHash ? "ok" : "pending"}`}>
+            {run?.receivedHash ? (run.originalHash === run.receivedHash ? "OK — arquivo recebido com sucesso" : "Erro — arquivo corrompido") : "Aguardando finalização"}
+          </div>
+        </Card>
+
+        <Card title="Log de eventos ao vivo" action={<button className="tiny-btn" onClick={() => setClearedLogAt(Date.now())} type="button">Limpar</button>} className="live-log-card">
+          <div className="live-log">
+            {logEvents.slice(-120).map((event, index) => (
+              <div className={event.type.toLowerCase()} key={event.id ?? `${event.timestamp}-${index}`}>
+                <b>{logNumber(event, index)}</b>
+                <time>{formatLogDate(event.timestamp)}</time>
+                <em>{origin(event)}</em>
+                <strong>{event.type.replaceAll("_", " ")}</strong>
+                <span>{event.message.replace(/^\[[^\]]+\]\s*/, "")}</span>
+              </div>
+            ))}
+          </div>
+        </Card>
+      </aside>
+    </main>
+  );
+}
+
+function Card({ title, children, action, className = "" }: { title: string; children: ReactNode; action?: ReactNode; className?: string }) {
+  return (
+    <section className={`card ${className}`}>
+      <header>
+        <h2>{title}</h2>
+        {action}
+      </header>
+      {children}
+    </section>
+  );
+}
+
+function Field({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <label className="field">
+      <span>{label}</span>
+      {children}
+    </label>
+  );
+}
+
+function SliderField({ label, value, setValue, min, max, suffix, step = 1 }: { label: string; value: number; setValue: (value: number) => void; min: number; max: number; suffix: string; step?: number }) {
+  return (
+    <div className="slider-field">
+      <div>
+        <label>{label}</label>
+        <input type="number" value={value} min={min} max={max} step={step} onChange={(event) => setValue(Number(event.target.value))} />
+        <span>{suffix}</span>
+      </div>
+      <input type="range" value={value} min={min} max={max} step={step} onChange={(event) => setValue(Number(event.target.value))} />
+    </div>
+  );
+}
+
+function NumberField({ label, value, setValue, suffix, min, max, step = 1 }: { label: string; value: number; setValue: (value: number) => void; suffix: string; min: number; max: number; step?: number }) {
+  return (
+    <div className="number-field">
+      <label>{label}</label>
+      <div>
+        <input type="number" value={value} min={min} max={max} step={step} onChange={(event) => setValue(Number(event.target.value))} />
+        <span>{suffix}</span>
+      </div>
+    </div>
+  );
+}
+
+function Toggle({ label, checked, setChecked }: { label: string; checked: boolean; setChecked: (checked: boolean) => void }) {
+  return (
+    <label className="toggle-row">
+      <span>{label}</span>
+      <input type="checkbox" checked={checked} onChange={(event) => setChecked(event.target.checked)} />
+    </label>
+  );
+}
+
+function MetricCard({ title, lines, hero, progress }: { title: string; lines: string[]; hero?: string; progress?: number }) {
+  return (
+    <section className="metric-card">
+      <h2>{title}</h2>
+      {hero ? <b>{hero}</b> : null}
+      {progress != null ? <i><span style={{ width: `${progress}%` }} /></i> : null}
+      {lines.map((line) => <p key={line}>{line}</p>)}
+    </section>
+  );
+}
+
+function PacketGrid({ packets, selectedPacketId, setSelectedPacketId }: { packets: Array<{ packetId: number; state: PacketState; events: RdtEvent[] }>; selectedPacketId: number; setSelectedPacketId: (id: number) => void }) {
+  const columns = 28;
+  const rowsPerPage = 3;
+  const pageSize = columns * rowsPerPage;
+  const [pageIndex, setPageIndex] = useState(0);
+  const latest = [...packets].reverse().find((packet) => packet.events.length > 0)?.packetId ?? 0;
+  const pageCount = Math.max(1, Math.ceil(packets.length / pageSize));
+  const firstVisibleRow = pageIndex * rowsPerPage + 1;
+  const lastVisibleRow = Math.min(Math.ceil(packets.length / columns), firstVisibleRow + rowsPerPage - 1);
+  const fixedRows = packets.slice(pageIndex * pageSize, pageIndex * pageSize + pageSize);
+  const currentStart = Math.floor(latest / columns) * columns;
+  const currentRow = packets.slice(currentStart, currentStart + columns);
+  const showCurrentRow = packets.length > columns;
+
+  useEffect(() => {
+    setPageIndex((current) => Math.min(current, pageCount - 1));
+  }, [pageCount]);
+
+  return (
+    <div className="packet-grid-shell">
+      <div className="packet-pagebar">
+        <span>Linhas fixas {firstVisibleRow}-{lastVisibleRow}</span>
+        <div>
+          <button type="button" onClick={() => setPageIndex((current) => Math.max(0, current - 1))} disabled={pageIndex === 0}>Anterior</button>
+          <b>{pageIndex + 1}/{pageCount}</b>
+          <button type="button" onClick={() => setPageIndex((current) => Math.min(pageCount - 1, current + 1))} disabled={pageIndex >= pageCount - 1}>Próxima</button>
+        </div>
+      </div>
+      <div className="packet-grid">
+        {fixedRows.map((packet) => <PacketCell key={packet.packetId} packet={packet} selected={packet.packetId === selectedPacketId} onClick={setSelectedPacketId} />)}
+      </div>
+      {showCurrentRow ? (
+        <>
+          <div className="packet-current-label">Linha atual: pacotes {currentStart}-{Math.min(packets.length - 1, currentStart + columns - 1)}</div>
+          <div className="packet-grid current-row">
+            {currentRow.map((packet) => <PacketCell key={`current-${packet.packetId}`} packet={packet} selected={packet.packetId === selectedPacketId} onClick={setSelectedPacketId} />)}
+          </div>
+        </>
+      ) : null}
+    </div>
+  );
+}
+
+function PacketCell({ packet, selected, onClick }: { packet: { packetId: number; state: PacketState; events: RdtEvent[] }; selected: boolean; onClick: (id: number) => void }) {
+  const attempts = packet.events.filter((event) => event.type === "PACKET_SENT").length;
+  const ack = packet.events.some((event) => event.type === "ACK_RECEIVED");
+  const seq = packet.events.find((event) => event.seq != null)?.seq ?? "-";
+  const bytes = packet.events.find((event) => typeof event.metadata?.payloadBytes === "number")?.metadata?.payloadBytes ?? "-";
+  const title = [`Packet ID: ${packet.packetId}`, `Seq: ${seq}`, `Checksum: ${packet.state === "corrupted" ? "falhou" : "OK"}`, `Tentativas: ${attempts}`, `Tempo: ${packet.events.length ? "registrado" : "-"}`, `ACK: ${ack ? "sim" : "não"}`, `Bytes: ${bytes}`].join("\n");
+  return (
+    <button className={`packet-cell ${packet.state} ${selected ? "selected" : ""}`} title={title} onClick={() => onClick(packet.packetId)} type="button">
+      {packet.packetId}
+    </button>
+  );
+}
+
+function StatLine({ label, value }: { label: string; value: string | number }) {
+  return (
+    <div className="stat-line">
+      <span>{label}</span>
+      <b>{value}</b>
     </div>
   );
 }

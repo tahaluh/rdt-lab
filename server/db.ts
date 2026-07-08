@@ -2,14 +2,14 @@ import Database from "better-sqlite3";
 import fs from "node:fs";
 import path from "node:path";
 import { ensureDataDirs } from "../rdt/fileUtils";
-import type { RdtEvent, RunConfig, RunRecord, RunStatus } from "../rdt/events";
+import type { Protocol, RdtEvent, RunConfig, RunRecord, RunStatus } from "../rdt/events";
 
 let db: Database.Database | null = null;
 
 function rowToRun(row: Record<string, unknown>): RunRecord {
   return {
     id: String(row.id),
-    protocol: "STOP_AND_WAIT",
+    protocol: row.protocol as Protocol,
     fileName: String(row.file_name),
     fileSize: Number(row.file_size),
     payloadSize: Number(row.payload_size),
@@ -21,6 +21,7 @@ function rowToRun(row: Record<string, unknown>): RunRecord {
     status: row.status as RunStatus,
     startedAt: Number(row.started_at),
     finishedAt: row.finished_at == null ? undefined : Number(row.finished_at),
+    savedAt: row.saved_at == null ? undefined : Number(row.saved_at),
     originalHash: row.original_hash == null ? undefined : String(row.original_hash),
     receivedHash: row.received_hash == null ? undefined : String(row.received_hash)
   };
@@ -31,7 +32,7 @@ function rowToEvent(row: Record<string, unknown>): RdtEvent {
     id: Number(row.id),
     runId: String(row.run_id),
     timestamp: Number(row.timestamp),
-    protocol: "STOP_AND_WAIT",
+    protocol: row.protocol as Protocol,
     packetId: row.packet_id == null ? undefined : Number(row.packet_id),
     seq: row.seq == null ? undefined : (Number(row.seq) as 0 | 1),
     type: row.type as RdtEvent["type"],
@@ -83,6 +84,14 @@ function openDb(): Database.Database {
       FOREIGN KEY(run_id) REFERENCES runs(id)
     );
   `);
+  const runColumns = new Set(
+    db.prepare("PRAGMA table_info(runs)")
+      .all()
+      .map((row) => String((row as { name: unknown }).name))
+  );
+  if (!runColumns.has("saved_at")) {
+    db.exec("ALTER TABLE runs ADD COLUMN saved_at INTEGER");
+  }
   return db;
 }
 
@@ -152,6 +161,12 @@ export function listRuns(): RunRecord[] {
 export function getRun(runId: string): RunRecord | null {
   const row = database().prepare("SELECT * FROM runs WHERE id = ?").get(runId) as Record<string, unknown> | undefined;
   return row ? rowToRun(row) : null;
+}
+
+export function saveRunSnapshot(runId: string): RunRecord | null {
+  const savedAt = Date.now();
+  const result = database().prepare("UPDATE runs SET saved_at = ? WHERE id = ?").run(savedAt, runId);
+  return result.changes > 0 ? getRun(runId) : null;
 }
 
 export function listEvents(runId: string): RdtEvent[] {

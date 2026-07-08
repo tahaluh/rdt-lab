@@ -1,4 +1,4 @@
-export type Protocol = "STOP_AND_WAIT";
+export type Protocol = "UDP" | "STOP_AND_WAIT" | "GO_BACK_N" | "SELECTIVE_REPEAT";
 
 export type RdtEventType =
   | "RUN_STARTED"
@@ -35,6 +35,7 @@ export type RdtEvent = {
 export type RunStatus = "running" | "finished" | "failed" | "stopped";
 
 export type RunConfig = {
+  protocol: Protocol;
   fileName: string;
   payloadSize: number;
   packetLossRate: number;
@@ -43,6 +44,7 @@ export type RunConfig = {
   artificialDelayMs: number;
   timeoutMs: number;
   demoMode: boolean;
+  windowSize: number;
 };
 
 export type RunRecord = {
@@ -59,6 +61,7 @@ export type RunRecord = {
   status: RunStatus;
   startedAt: number;
   finishedAt?: number;
+  savedAt?: number;
   originalHash?: string;
   receivedHash?: string;
 };
@@ -71,6 +74,7 @@ export type PacketState =
   | "acknowledged"
   | "lost"
   | "corrupted"
+  | "timeout"
   | "retransmitted"
   | "duplicated";
 

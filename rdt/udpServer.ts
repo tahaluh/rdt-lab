@@ -8,7 +8,9 @@ import { eventBus } from "../server/websocket";
 export class RdtUdpServer {
   private socket = dgram.createSocket("udp4");
   private receivedPacketIds = new Set<number>();
+  private bufferedPackets = new Map<number, RdtPacket>();
   private expectedSeq: 0 | 1 = 0;
+  private expectedPacketId = 0;
   private outputPath = "";
   private closed = false;
 
@@ -21,6 +23,7 @@ export class RdtUdpServer {
         if (this.closed) return;
         eventBus.emitRdt({
           runId: this.runId,
+          protocol: this.config.protocol,
           type: "RUN_FAILED",
           message: `[SERVER] UDP receive failed: ${error instanceof Error ? error.message : String(error)}`,
           metadata: { error: error instanceof Error ? error.message : String(error) }
@@ -52,6 +55,7 @@ export class RdtUdpServer {
     if (shouldDropPacket(this.config)) {
       eventBus.emitRdt({
         runId: this.runId,
+        protocol: this.config.protocol,
         packetId: packet.packetId,
         seq: packet.seq,
         type: "PACKET_LOST",
@@ -65,6 +69,7 @@ export class RdtUdpServer {
     if (delayMs > 0) {
       eventBus.emitRdt({
         runId: this.runId,
+        protocol: this.config.protocol,
         packetId: packet.packetId,
         seq: packet.seq,
         type: "PACKET_DELAYED",
@@ -79,6 +84,7 @@ export class RdtUdpServer {
       packet = corruptPacket(packet);
       eventBus.emitRdt({
         runId: this.runId,
+        protocol: this.config.protocol,
         packetId: decoded.packetId,
         seq: decoded.seq,
         type: "PACKET_CORRUPTED",
@@ -91,6 +97,7 @@ export class RdtUdpServer {
     if (!verifyPacket(packet)) {
       eventBus.emitRdt({
         runId: this.runId,
+        protocol: this.config.protocol,
         packetId: packet.packetId,
         seq: packet.seq,
         type: "PACKET_CORRUPTED",
@@ -102,15 +109,32 @@ export class RdtUdpServer {
 
     eventBus.emitRdt({
       runId: this.runId,
+      protocol: this.config.protocol,
       packetId: packet.packetId,
       seq: packet.seq,
       type: "PACKET_RECEIVED",
       message: `[SERVER] Packet ${packet.packetId} received seq=${packet.seq}`
     });
 
+    if (this.config.protocol === "UDP") {
+      await this.writePacket(packet);
+      return;
+    }
+
+    if (this.config.protocol === "GO_BACK_N") {
+      await this.handleGoBackN(packet, rinfo);
+      return;
+    }
+
+    if (this.config.protocol === "SELECTIVE_REPEAT") {
+      await this.handleSelectiveRepeat(packet, rinfo);
+      return;
+    }
+
     if (this.receivedPacketIds.has(packet.packetId) || packet.seq !== this.expectedSeq) {
       eventBus.emitRdt({
         runId: this.runId,
+        protocol: this.config.protocol,
         packetId: packet.packetId,
         seq: packet.seq,
         type: "DUPLICATE_RECEIVED",
@@ -121,18 +145,90 @@ export class RdtUdpServer {
       return;
     }
 
+    await this.writePacket(packet);
+
+    await this.sendAck(packet, rinfo);
+    this.expectedSeq = this.expectedSeq === 0 ? 1 : 0;
+  }
+
+  private async handleGoBackN(packet: RdtPacket, rinfo: RemoteInfo): Promise<void> {
+    if (packet.packetId === this.expectedPacketId && !this.receivedPacketIds.has(packet.packetId)) {
+      await this.writePacket(packet);
+      this.expectedPacketId += 1;
+      await this.sendAck(packet, rinfo);
+      return;
+    }
+
+    eventBus.emitRdt({
+      runId: this.runId,
+      protocol: this.config.protocol,
+      packetId: packet.packetId,
+      seq: packet.seq,
+      type: "DUPLICATE_RECEIVED",
+      message: `[SERVER] Packet ${packet.packetId} out-of-order; Go-Back-N expects ${this.expectedPacketId}`,
+      metadata: { expectedPacketId: this.expectedPacketId, cumulativeAck: Math.max(0, this.expectedPacketId - 1) }
+    });
+
+    if (this.expectedPacketId > 0) {
+      const ackPacketId = this.expectedPacketId - 1;
+      await this.sendAck({ ...packet, packetId: ackPacketId, seq: (ackPacketId % 2) as 0 | 1 }, rinfo);
+    }
+  }
+
+  private async handleSelectiveRepeat(packet: RdtPacket, rinfo: RemoteInfo): Promise<void> {
+    const windowEnd = this.expectedPacketId + Math.max(1, this.config.windowSize);
+    if (packet.packetId < this.expectedPacketId || this.receivedPacketIds.has(packet.packetId)) {
+      eventBus.emitRdt({
+        runId: this.runId,
+        protocol: this.config.protocol,
+        packetId: packet.packetId,
+        seq: packet.seq,
+        type: "DUPLICATE_RECEIVED",
+        message: `[SERVER] Packet ${packet.packetId} duplicate; ACK resent`
+      });
+      await this.sendAck(packet, rinfo);
+      return;
+    }
+
+    if (packet.packetId >= windowEnd) {
+      eventBus.emitRdt({
+        runId: this.runId,
+        protocol: this.config.protocol,
+        packetId: packet.packetId,
+        seq: packet.seq,
+        type: "DUPLICATE_RECEIVED",
+        message: `[SERVER] Packet ${packet.packetId} outside Selective Repeat window ${this.expectedPacketId}-${windowEnd - 1}`,
+        metadata: { expectedPacketId: this.expectedPacketId, windowSize: this.config.windowSize }
+      });
+      return;
+    }
+
+    this.bufferedPackets.set(packet.packetId, packet);
+    await this.sendAck(packet, rinfo);
+    await this.flushSelectiveRepeatBuffer();
+  }
+
+  private async flushSelectiveRepeatBuffer(): Promise<void> {
+    for (;;) {
+      const packet = this.bufferedPackets.get(this.expectedPacketId);
+      if (!packet) return;
+      this.bufferedPackets.delete(this.expectedPacketId);
+      await this.writePacket(packet);
+      this.expectedPacketId += 1;
+    }
+  }
+
+  private async writePacket(packet: RdtPacket): Promise<void> {
     await appendOutput(this.outputPath, packetPayload(packet));
     this.receivedPacketIds.add(packet.packetId);
     eventBus.emitRdt({
       runId: this.runId,
+      protocol: this.config.protocol,
       packetId: packet.packetId,
       seq: packet.seq,
       type: "PACKET_WRITTEN",
       message: `[SERVER] Packet ${packet.packetId} written to output file`
     });
-
-    await this.sendAck(packet, rinfo);
-    this.expectedSeq = this.expectedSeq === 0 ? 1 : 0;
   }
 
   private async sendAck(packet: RdtPacket, rinfo: RemoteInfo): Promise<void> {
@@ -141,6 +237,7 @@ export class RdtUdpServer {
     if (shouldDropAck(this.config)) {
       eventBus.emitRdt({
         runId: this.runId,
+        protocol: this.config.protocol,
         packetId: packet.packetId,
         seq: packet.seq,
         type: "ACK_LOST",
@@ -163,6 +260,7 @@ export class RdtUdpServer {
     }
     eventBus.emitRdt({
       runId: this.runId,
+      protocol: this.config.protocol,
       packetId: packet.packetId,
       seq: packet.seq,
       type: "ACK_SENT",

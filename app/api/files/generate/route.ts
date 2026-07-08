@@ -21,7 +21,7 @@ export async function POST(request: NextRequest) {
   const body = (await request.json()) as Body;
   const mode = body.mode ?? "text";
   const payloadSize = Math.max(1, Math.min(4096, Number(body.payloadSize ?? 512)));
-  const packets = Math.max(1, Math.min(50000, Number(body.packets ?? 10)));
+  const packets = Math.floor(Math.max(1, Math.min(50000, Number(body.packets ?? 10))));
   const bytes = Math.max(1, Math.min(100 * 1024 * 1024, Number(body.bytes ?? packets * payloadSize)));
   const fileName = safeFileName(body.fileName ?? `${mode}-${Date.now()}.${mode === "random" ? "bin" : "txt"}`);
 
