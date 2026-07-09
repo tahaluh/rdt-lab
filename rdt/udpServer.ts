@@ -15,7 +15,12 @@ export class RdtUdpServer {
   private outputPath = "";
   private closed = false;
 
-  constructor(private readonly runId: string, private readonly config: RunConfig) {}
+  constructor(
+    private readonly runId: string,
+    private readonly config: RunConfig,
+    private readonly bindHost = "127.0.0.1",
+    private readonly bindPort = 0
+  ) {}
 
   async start(): Promise<number> {
     this.outputPath = await resetOutputFile(this.runId, this.config.fileName);
@@ -31,7 +36,7 @@ export class RdtUdpServer {
         });
       });
     });
-    await new Promise<void>((resolve) => this.socket.bind(0, "127.0.0.1", resolve));
+    await new Promise<void>((resolve) => this.socket.bind(this.bindPort, this.bindHost, resolve));
     const address = this.socket.address();
     if (typeof address === "string") throw new Error("Unexpected UDP address");
     return address.port;

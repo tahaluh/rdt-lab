@@ -45,6 +45,7 @@ export type RunConfig = {
   timeoutMs: number;
   demoMode: boolean;
   windowSize: number;
+  externalClient?: boolean;
 };
 
 export type RunRecord = {

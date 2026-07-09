@@ -364,10 +364,11 @@ export function RdtDashboard({ initialRunId }: { initialRunId?: string }) {
       : bytesForSize(sizePreset, customKb);
   const estimatedPackets = sourceMode === "packets" ? effectivePacketCount : Math.ceil(configuredBytes / payloadSize) || 1;
   const runTotalPackets = run ? Math.ceil(run.fileSize / run.payloadSize) || 1 : estimatedPackets;
-  const activeProtocol = run?.protocol ?? labProtocol;
-  const hasReliability = labProtocol !== "UDP";
-  const hasSlidingWindow = labProtocol === "GO_BACK_N" || labProtocol === "SELECTIVE_REPEAT";
-  const effectiveWindowSize = hasSlidingWindow ? (windowMode === "custom" ? customWindowSize : windowSize) : labProtocol === "STOP_AND_WAIT" ? 1 : 0;
+  const configuredProtocol = labProtocol;
+  const activeProtocol = run?.protocol ?? configuredProtocol;
+  const hasReliability = configuredProtocol !== "UDP";
+  const hasSlidingWindow = configuredProtocol === "GO_BACK_N" || configuredProtocol === "SELECTIVE_REPEAT";
+  const effectiveWindowSize = hasSlidingWindow ? (windowMode === "custom" ? customWindowSize : windowSize) : configuredProtocol === "STOP_AND_WAIT" ? 1 : 0;
 
   const packets = useMemo(() => {
     const grouped = new Map<number, RdtEvent[]>();
@@ -419,7 +420,6 @@ export function RdtDashboard({ initialRunId }: { initialRunId?: string }) {
   const latestSeq = [...currentEvents].reverse().find((event) => event.seq != null)?.seq;
   const seqCurrent = latestSeq ?? (activeProtocol === "STOP_AND_WAIT" ? stats.confirmed % 2 : stats.confirmed);
   const etaMs = stats.progress > 0 && stats.progress < 100 ? stats.elapsedMs * ((100 - stats.progress) / stats.progress) : 0;
-
   async function resolveFileName(): Promise<string> {
     if (sourceMode === "file") {
       return selectedFile || files[0]?.name || "";
@@ -476,7 +476,7 @@ export function RdtDashboard({ initialRunId }: { initialRunId?: string }) {
       return;
     }
     const config: RunConfig = {
-      protocol: labProtocol,
+      protocol: configuredProtocol,
       fileName,
       payloadSize,
       packetLossRate: packetLoss / 100,
@@ -485,7 +485,8 @@ export function RdtDashboard({ initialRunId }: { initialRunId?: string }) {
       artificialDelayMs: delay + Math.floor(rtt / 2) + Math.floor(jitter / 2),
       timeoutMs: hasReliability ? timeoutMs : 0,
       demoMode: slowMode,
-      windowSize: effectiveWindowSize
+      windowSize: effectiveWindowSize,
+      externalClient: false
     };
     try {
       const response = await fetch("/api/runs", {
@@ -501,6 +502,7 @@ export function RdtDashboard({ initialRunId }: { initialRunId?: string }) {
       currentRunIdRef.current = data.run.id;
       setRun(data.run);
       window.history.replaceState(null, "", `/runs/${data.run.id}`);
+      void loadRun(data.run.id);
     } catch (error) {
       setSaveStatus(`Erro ao iniciar: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
@@ -744,15 +746,16 @@ export function RdtDashboard({ initialRunId }: { initialRunId?: string }) {
           <div className="config-divider" />
           <h3 className="config-subtitle">Protocolo</h3>
           <Field label="Protocolo">
-            <select value={labProtocol} onChange={(event) => setLabProtocol(event.target.value as LabProtocol)}>
+            <select value={configuredProtocol} onChange={(event) => setLabProtocol(event.target.value as LabProtocol)}>
               <option value="UDP">UDP puro</option>
               <option value="STOP_AND_WAIT">Stop-and-Wait</option>
               <option value="GO_BACK_N">Go-Back-N</option>
               <option value="SELECTIVE_REPEAT">Selective Repeat</option>
             </select>
           </Field>
-          {labProtocol === "STOP_AND_WAIT" ? <div className="protocol-note">Janela fixa: <b>1</b></div> : null}
-          {labProtocol === "GO_BACK_N" ? <div className="protocol-note">ACK cumulativo: <b>informativo</b></div> : null}
+          <div className="protocol-note">Execução automática: cliente e servidor UDP rodam no backend, sem precisar abrir outro terminal.</div>
+          {configuredProtocol === "STOP_AND_WAIT" ? <div className="protocol-note">Janela fixa: <b>1</b></div> : null}
+          {configuredProtocol === "GO_BACK_N" ? <div className="protocol-note">ACK cumulativo: <b>informativo</b></div> : null}
           {hasSlidingWindow ? (
             <div className="window-config">
               <Field label="Janela">

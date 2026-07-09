@@ -31,10 +31,47 @@ Open `http://127.0.0.1:3000`.
 Available scripts:
 
 - `npm run dev`: starts the custom Node server with Next.js, WebSocket, UDP client/server, the RDT engine, and SQLite in one process.
+- `npm run dev:watch`: starts the same development server with process restart on server-side file changes.
 - `npm run build`: builds the Next.js app and the custom server.
 - `npm run start`: starts the production server after a build.
+- `npm run udp:client`: sends a dashboard-created external UDP run from a real CLI UDP client.
 - `npm run seed:files`: recreates sample files in `data/input`.
 - `npm run typecheck`: runs TypeScript checks.
+
+Docker development with hot reload:
+
+```bash
+docker compose --profile dev up rdt-lab-dev --build
+```
+
+Open `http://127.0.0.1:3000`. Source files are mounted into the container, Next.js handles frontend hot reload, and `tsx watch` restarts the custom server for server/RDT changes.
+
+## Execution Modes
+
+By default, the app runs automatically: the browser starts a run over HTTPS, then the backend runs both the UDP client and UDP server in the same Node process. This works from any browser without installing or running anything else.
+
+Browsers cannot open raw UDP sockets. The experimental CLI client is kept for network-capture experiments, but it is not part of the default dashboard flow:
+
+```bash
+npm run udp:client -- --base-url https://your-dashboard.example --run RUN_ID --host UDP_PUBLIC_HOST --port 4000
+```
+
+The CLI fetches the run metadata and source file over HTTPS, then sends the file chunks as UDP datagrams to the UDP server. Capture with a filter such as:
+
+```text
+udp.port == 4000
+```
+
+For internet deployments, expose the UDP port directly on the host/firewall. A normal Cloudflare HTTPS proxy does not forward arbitrary UDP traffic.
+
+The dashboard currently always uses the automatic backend execution mode.
+
+Useful environment variables:
+
+- `RDT_UDP_BIND_HOST`: UDP bind address, default `0.0.0.0`.
+- `RDT_UDP_PORT`: UDP listen port for external runs, default `4000`.
+- `RDT_UDP_PUBLIC_HOST`: public host/IP shown to the external client. Set this to the VPS public IP or a DNS-only hostname.
+- `RDT_PUBLIC_BASE_URL`: optional dashboard URL used in server-generated command metadata.
 
 ## Dashboard Overview
 

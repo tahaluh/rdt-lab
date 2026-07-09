@@ -4,9 +4,11 @@
   "private": true,
   "scripts": {
     "dev": "tsx server/server.ts",
+    "dev:watch": "tsx watch server/server.ts",
     "build": "next build && tsc -p tsconfig.server.json",
     "start": "NODE_ENV=production node dist/server/server.js",
     "seed:files": "tsx scripts/seedFiles.ts",
+    "udp:client": "tsx scripts/udpClient.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

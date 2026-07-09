@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import os from "node:os";
 import { createRun, listEvents, updateRunFinished } from "../../server/db";
 import { eventBus } from "../../server/websocket";
 import { fileHash } from "../checksum";
@@ -13,9 +14,12 @@ declare global {
   // Next dev may evaluate route modules separately; active UDP runs must stay process-wide.
   // eslint-disable-next-line no-var
   var __rdtActiveRuns: Map<string, AbortController> | undefined;
+  // eslint-disable-next-line no-var
+  var __rdtExternalUdpRuns: Map<string, ExternalUdpSession> | undefined;
 }
 
 const activeRuns = (globalThis.__rdtActiveRuns ??= new Map<string, AbortController>());
+const externalUdpRuns = (globalThis.__rdtExternalUdpRuns ??= new Map<string, ExternalUdpSession>());
 
 const protocolNames: Record<Protocol, string> = {
   UDP: "UDP puro",
@@ -25,8 +29,35 @@ const protocolNames: Record<Protocol, string> = {
 };
 
 const UDP_FAST_SEND_BURST_SIZE = 24;
+const EXTERNAL_UDP_IDLE_TIMEOUT_MS = 45000;
+
+type ExternalUdpSession = {
+  runId: string;
+  serverHost: string;
+  serverPort: number;
+  bindHost: string;
+  command: string;
+  controller: AbortController;
+  server: RdtUdpServer;
+};
+
+function publicUdpHost(): string {
+  const explicitHost = process.env.RDT_UDP_PUBLIC_HOST?.trim();
+  if (explicitHost) return explicitHost;
+  const host = process.env.HOST?.trim();
+  if (host && host !== "0.0.0.0" && host !== "::") return host;
+
+  for (const addresses of Object.values(os.networkInterfaces())) {
+    for (const address of addresses ?? []) {
+      if (address.family === "IPv4" && !address.internal) return address.address;
+    }
+  }
+
+  return "127.0.0.1";
+}
 
 export async function startTransportRun(config: RunConfig): Promise<RunRecord> {
+  if (config.externalClient) return startExternalUdpRun(config);
   const runId = crypto.randomUUID();
   const input = await readInputFile(config.fileName);
   const originalHash = fileHash(input);
@@ -48,6 +79,7 @@ export async function startTransportRun(config: RunConfig): Promise<RunRecord> {
   createRun(run, config);
   const controller = new AbortController();
   activeRuns.set(runId, controller);
+  eventBus.broadcast({ type: "run-started", runId });
   eventBus.emitRdt({
     runId,
     protocol: config.protocol,
@@ -55,7 +87,6 @@ export async function startTransportRun(config: RunConfig): Promise<RunRecord> {
     message: `[RUN] ${protocolNames[config.protocol]} started for ${config.fileName}`,
     metadata: { config, fileSize: input.byteLength }
   });
-  eventBus.broadcast({ type: "run-started", runId });
 
   void executeRun(runId, config, input, originalHash, controller.signal).finally(() => activeRuns.delete(runId));
   return run;
@@ -71,9 +102,127 @@ export function isRunActive(runId: string): boolean {
 
 export function stopRun(runId: string): boolean {
   const controller = activeRuns.get(runId);
+  const external = externalUdpRuns.get(runId);
+  if (external) external.server.close();
   if (!controller) return false;
   controller.abort();
   return true;
+}
+
+export function getExternalUdpSession(runId: string): Omit<ExternalUdpSession, "controller" | "server"> | null {
+  const session = externalUdpRuns.get(runId);
+  if (!session) return null;
+  return {
+    runId: session.runId,
+    serverHost: session.serverHost,
+    serverPort: session.serverPort,
+    bindHost: session.bindHost,
+    command: session.command
+  };
+}
+
+async function startExternalUdpRun(config: RunConfig): Promise<RunRecord> {
+  const runId = crypto.randomUUID();
+  const input = await readInputFile(config.fileName);
+  const originalHash = fileHash(input);
+  const run: RunRecord = {
+    id: runId,
+    protocol: config.protocol,
+    fileName: config.fileName,
+    fileSize: input.byteLength,
+    payloadSize: config.payloadSize,
+    packetLossRate: config.packetLossRate,
+    ackLossRate: config.ackLossRate,
+    corruptionRate: config.corruptionRate,
+    artificialDelayMs: config.artificialDelayMs,
+    timeoutMs: config.timeoutMs,
+    status: "running",
+    startedAt: Date.now(),
+    originalHash
+  };
+  createRun(run, config);
+  const totalPackets = Math.ceil(input.byteLength / config.payloadSize) || 1;
+  const controller = new AbortController();
+  const bindHost = process.env.RDT_UDP_BIND_HOST ?? "0.0.0.0";
+  const requestedPort = Number(process.env.RDT_UDP_PORT ?? 4000);
+  const serverHost = publicUdpHost();
+  const server = new RdtUdpServer(runId, config, bindHost, requestedPort);
+
+  try {
+    const serverPort = await server.start();
+    const session = {
+      runId,
+      serverHost,
+      serverPort,
+      bindHost,
+      command: `npm run udp:client -- --base-url ${process.env.RDT_PUBLIC_BASE_URL ?? "https://SEU-DOMINIO"} --run ${runId} --host ${serverHost} --port ${serverPort}`,
+      controller,
+      server
+    };
+    activeRuns.set(runId, controller);
+    externalUdpRuns.set(runId, session);
+    eventBus.broadcast({ type: "run-started", runId });
+    eventBus.emitRdt({
+      runId,
+      protocol: config.protocol,
+      type: "RUN_STARTED",
+      message: `[RUN] ${protocolNames[config.protocol]} aguardando cliente UDP em ${serverHost}:${serverPort}`,
+      metadata: { config, fileSize: input.byteLength, externalClient: true, serverHost, serverPort, bindHost, command: session.command }
+    });
+    createPackets(runId, config, input);
+    void finishExternalUdpRun(runId, config, totalPackets, originalHash, server, controller.signal).finally(() => {
+      activeRuns.delete(runId);
+      externalUdpRuns.delete(runId);
+    });
+    return run;
+  } catch (error) {
+    server.close();
+    throw error;
+  }
+}
+
+async function finishExternalUdpRun(
+  runId: string,
+  config: RunConfig,
+  totalPackets: number,
+  originalHash: string,
+  server: RdtUdpServer,
+  signal: AbortSignal
+): Promise<void> {
+  try {
+    if (config.protocol === "UDP") await waitForUdpTerminalEvents(runId, config, totalPackets, signal);
+    else await server.waitForPacketWrites(totalPackets, signal);
+    const receivedHash = await hashFilePath(server.getOutputPath());
+    eventBus.emitRdt({
+      runId,
+      protocol: config.protocol,
+      type: "TRANSFER_FINISHED",
+      message: `[RUN] External UDP transfer finished`,
+      metadata: { outputPath: server.getOutputPath(), externalClient: true }
+    });
+    eventBus.emitRdt({
+      runId,
+      protocol: config.protocol,
+      type: "HASH_VERIFIED",
+      message: originalHash === receivedHash ? `[RUN] SHA-256 hashes match` : `[RUN] SHA-256 mismatch`,
+      metadata: { originalHash, receivedHash, ok: originalHash === receivedHash }
+    });
+    updateRunFinished(runId, originalHash === receivedHash ? "finished" : "failed", originalHash, receivedHash);
+    eventBus.broadcast({ type: "run-finished", runId });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    eventBus.emitRdt({
+      runId,
+      protocol: config.protocol,
+      type: signal.aborted ? "TRANSFER_FINISHED" : "RUN_FAILED",
+      message: signal.aborted ? `[RUN] Transfer stopped by user` : `[RUN] Failed: ${message}`,
+      metadata: { error: message }
+    });
+    updateRunFinished(runId, signal.aborted ? "stopped" : "failed", originalHash);
+    eventBus.broadcast({ type: "run-finished", runId });
+  } finally {
+    server.close();
+  }
 }
 
 async function executeRun(runId: string, config: RunConfig, input: Buffer, originalHash: string, signal: AbortSignal): Promise<void> {
@@ -175,50 +324,84 @@ async function executeUdp(runId: string, config: RunConfig, packets: RdtPacket[]
 }
 
 async function resolveUdpPackets(runId: string, config: RunConfig, packets: RdtPacket[], sendTimes: Map<number, number>, signal: AbortSignal): Promise<void> {
+  await waitForUdpTerminalEvents(runId, config, packets.length, signal, sendTimes, packets);
+}
+
+async function waitForUdpTerminalEvents(
+  runId: string,
+  config: RunConfig,
+  totalPackets: number,
+  signal: AbortSignal,
+  sendTimes?: Map<number, number>,
+  packets?: RdtPacket[]
+): Promise<void> {
   const terminalEvents = new Set(["PACKET_LOST", "PACKET_CORRUPTED", "PACKET_WRITTEN"]);
   const observedEvents = new Set(["PACKET_DELAYED", "PACKET_RECEIVED"]);
   const resolved = new Set<number>();
   const observed = new Set<number>();
   const timedOut = new Set<number>();
   const deliveryTimeoutMs = Math.min(30000, Math.max(3000, artificialDelay(config) * 6 + 3000));
+  const startedAt = Date.now();
+  let lastResolvedSize = 0;
+  let lastProgressAt = startedAt;
 
-  while (resolved.size < packets.length) {
+  while (resolved.size < totalPackets) {
     if (signal.aborted) throw new Error("Transmissao parada pelo usuario");
     for (const event of listEvents(runId)) {
       if (event.packetId == null) continue;
       if (observedEvents.has(event.type)) observed.add(event.packetId);
       if (terminalEvents.has(event.type)) resolved.add(event.packetId);
     }
-
-    const now = Date.now();
-    for (const packet of packets) {
-      if (resolved.has(packet.packetId) || timedOut.has(packet.packetId)) continue;
-      if (observed.has(packet.packetId)) continue;
-      const sentAt = sendTimes.get(packet.packetId) ?? now;
-      if (now - sentAt < deliveryTimeoutMs) continue;
-      timedOut.add(packet.packetId);
-      eventBus.emitRdt({
-        runId,
-        protocol: config.protocol,
-        packetId: packet.packetId,
-        seq: packet.seq,
-        type: "TIMEOUT",
-        message: `[CLIENT] UDP delivery timeout for packet ${packet.packetId}`,
-        metadata: { timeoutMs: deliveryTimeoutMs, reason: "udp_no_ack" }
-      });
-      eventBus.emitRdt({
-        runId,
-        protocol: config.protocol,
-        packetId: packet.packetId,
-        seq: packet.seq,
-        type: "PACKET_LOST",
-        message: `[CHANNEL] Packet ${packet.packetId} timed out without delivery confirmation`,
-        metadata: { direction: "client_to_server", inferred: true, reason: "udp_delivery_timeout" }
-      });
-      resolved.add(packet.packetId);
+    if (resolved.size > lastResolvedSize) {
+      lastResolvedSize = resolved.size;
+      lastProgressAt = Date.now();
     }
 
-    if (resolved.size < packets.length) await sleep(100);
+    const now = Date.now();
+    if (sendTimes && packets) {
+      for (const packet of packets) {
+        if (resolved.has(packet.packetId) || timedOut.has(packet.packetId)) continue;
+        if (observed.has(packet.packetId)) continue;
+        const sentAt = sendTimes.get(packet.packetId) ?? now;
+        if (now - sentAt < deliveryTimeoutMs) continue;
+        timedOut.add(packet.packetId);
+        eventBus.emitRdt({
+          runId,
+          protocol: config.protocol,
+          packetId: packet.packetId,
+          seq: packet.seq,
+          type: "TIMEOUT",
+          message: `[CLIENT] UDP delivery timeout for packet ${packet.packetId}`,
+          metadata: { timeoutMs: deliveryTimeoutMs, reason: "udp_no_ack" }
+        });
+        eventBus.emitRdt({
+          runId,
+          protocol: config.protocol,
+          packetId: packet.packetId,
+          seq: packet.seq,
+          type: "PACKET_LOST",
+          message: `[CHANNEL] Packet ${packet.packetId} timed out without delivery confirmation`,
+          metadata: { direction: "client_to_server", inferred: true, reason: "udp_delivery_timeout" }
+        });
+        resolved.add(packet.packetId);
+      }
+    } else if (now - lastProgressAt > EXTERNAL_UDP_IDLE_TIMEOUT_MS) {
+      for (let packetId = 0; packetId < totalPackets; packetId += 1) {
+        if (resolved.has(packetId)) continue;
+        eventBus.emitRdt({
+          runId,
+          protocol: config.protocol,
+          packetId,
+          seq: packetId,
+          type: "PACKET_LOST",
+          message: `[CHANNEL] Packet ${packetId} did not reach the UDP server before idle timeout`,
+          metadata: { direction: "client_to_server", inferred: true, reason: "external_udp_idle_timeout", timeoutMs: EXTERNAL_UDP_IDLE_TIMEOUT_MS }
+        });
+        resolved.add(packetId);
+      }
+    }
+
+    if (resolved.size < totalPackets) await sleep(100);
   }
 }
 

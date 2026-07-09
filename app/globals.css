@@ -274,6 +274,47 @@ button:disabled {
   color: var(--text);
 }
 
+.external-udp-box {
+  margin-top: 7px;
+  border: 1px solid color-mix(in srgb, var(--cyan) 38%, var(--line));
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--cyan) 10%, var(--panel-2));
+  padding: 7px;
+  display: grid;
+  gap: 5px;
+}
+
+.external-udp-box span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.external-udp-box b {
+  color: #cffafe;
+  font-size: 12px;
+}
+
+.external-udp-box small {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.external-udp-box code {
+  display: block;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: rgba(2, 6, 23, 0.48);
+  color: var(--text);
+  padding: 6px;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
 .window-config {
   display: grid;
   gap: 7px;

@@ -16,6 +16,25 @@ WORKDIR /app
 COPY . .
 RUN npm run build
 
+FROM deps AS dev
+
+WORKDIR /app
+
+ENV NODE_ENV=development
+ENV HOST=0.0.0.0
+ENV PORT=3000
+ENV RDT_UDP_BIND_HOST=0.0.0.0
+ENV RDT_UDP_PORT=4000
+
+COPY . .
+
+RUN mkdir -p data/input data/output
+
+EXPOSE 3000
+EXPOSE 4000/udp
+
+CMD ["npm", "run", "dev:watch"]
+
 FROM node:20-bookworm-slim AS runner
 
 WORKDIR /app
@@ -23,6 +42,8 @@ WORKDIR /app
 ENV NODE_ENV=production
 ENV HOST=0.0.0.0
 ENV PORT=3000
+ENV RDT_UDP_BIND_HOST=0.0.0.0
+ENV RDT_UDP_PORT=4000
 
 COPY --from=builder /app/package.json /app/package-lock.json ./
 COPY --from=builder /app/node_modules ./node_modules
@@ -33,5 +54,6 @@ COPY --from=builder /app/next.config.mjs ./next.config.mjs
 RUN mkdir -p data/input data/output
 
 EXPOSE 3000
+EXPOSE 4000/udp
 
 CMD ["sh", "-c", "node dist/scripts/seedFiles.js && node dist/server/server.js"]

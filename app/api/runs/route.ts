@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { listRuns } from "@/server/db";
-import { startTransportRun } from "@/rdt/protocols/protocols";
+import { getExternalUdpSession, startTransportRun } from "@/rdt/protocols/protocols";
 import type { Protocol, RunConfig } from "@/rdt/events";
 
 export const dynamic = "force-dynamic";
@@ -26,7 +26,8 @@ function parseConfig(body: Partial<RunConfig>): RunConfig {
     artificialDelayMs: clamp(Number(body.artificialDelayMs ?? 0), 0, 2000),
     timeoutMs: protocol === "UDP" ? 0 : clamp(Number(body.timeoutMs ?? 1000), 300, 5000),
     demoMode: Boolean(body.demoMode ?? false),
-    windowSize: protocol === "UDP" ? 0 : protocol === "STOP_AND_WAIT" ? 1 : Math.floor(clamp(Number.isFinite(windowSize) ? windowSize : 4, 1, 256))
+    windowSize: protocol === "UDP" ? 0 : protocol === "STOP_AND_WAIT" ? 1 : Math.floor(clamp(Number.isFinite(windowSize) ? windowSize : 4, 1, 256)),
+    externalClient: Boolean(body.externalClient ?? false)
   };
 }
 
@@ -41,7 +42,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "fileName is required" }, { status: 400 });
     }
     const run = await startTransportRun(config);
-    return NextResponse.json({ run }, { status: 201 });
+    return NextResponse.json({ run, externalUdp: getExternalUdpSession(run.id) }, { status: 201 });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return NextResponse.json({ error: message || "Failed to start run" }, { status: 500 });

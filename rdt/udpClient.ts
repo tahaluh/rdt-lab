@@ -8,6 +8,8 @@ export class RdtUdpClient {
   private pendingAcks: RdtAck[] = [];
   private ackWaiters = new Set<(ack: RdtAck) => boolean>();
 
+  constructor(private readonly bindHost = "127.0.0.1", private readonly serverHost = "127.0.0.1") {}
+
   async start(): Promise<void> {
     this.socket.on("message", (message) => {
       const decoded = decodeMessage(message);
@@ -17,7 +19,7 @@ export class RdtUdpClient {
       }
       this.pendingAcks.push(decoded);
     });
-    await new Promise<void>((resolve) => this.socket.bind(0, "127.0.0.1", resolve));
+    await new Promise<void>((resolve) => this.socket.bind(0, this.bindHost, resolve));
   }
 
   close(): void {
@@ -28,7 +30,7 @@ export class RdtUdpClient {
 
   async sendPacket(packet: RdtPacket, serverPort: number): Promise<void> {
     await new Promise<void>((resolve, reject) => {
-      this.socket.send(encodeMessage(packet), serverPort, "127.0.0.1", (error) => (error ? reject(error) : resolve()));
+      this.socket.send(encodeMessage(packet), serverPort, this.serverHost, (error) => (error ? reject(error) : resolve()));
     });
   }
 

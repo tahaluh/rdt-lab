@@ -6,13 +6,46 @@ services:
     container_name: rdt-lab
     ports:
       - "${PORT:-8888}:3000"
+      - "${RDT_UDP_PORT:-4000}:${RDT_UDP_PORT:-4000}/udp"
     environment:
       NODE_ENV: production
       HOST: 0.0.0.0
       PORT: 3000
+      RDT_UDP_BIND_HOST: 0.0.0.0
+      RDT_UDP_PORT: ${RDT_UDP_PORT:-4000}
+      RDT_UDP_PUBLIC_HOST: ${RDT_UDP_PUBLIC_HOST:-}
+      RDT_PUBLIC_BASE_URL: ${RDT_PUBLIC_BASE_URL:-http://127.0.0.1:${PORT:-8888}}
     volumes:
+      - rdt-lab-data:/app/data
+    restart: unless-stopped
+
+  rdt-lab-dev:
+    profiles:
+      - dev
+    build:
+      context: .
+      target: dev
+    image: rdt-lab:dev
+    container_name: rdt-lab-dev
+    ports:
+      - "${DEV_PORT:-3000}:3000"
+      - "${RDT_UDP_PORT:-4000}:${RDT_UDP_PORT:-4000}/udp"
+    environment:
+      NODE_ENV: development
+      HOST: 0.0.0.0
+      PORT: 3000
+      RDT_UDP_BIND_HOST: 0.0.0.0
+      RDT_UDP_PORT: ${RDT_UDP_PORT:-4000}
+      RDT_UDP_PUBLIC_HOST: ${RDT_UDP_PUBLIC_HOST:-}
+      RDT_PUBLIC_BASE_URL: ${RDT_PUBLIC_BASE_URL:-http://127.0.0.1:${DEV_PORT:-3000}}
+      WATCHPACK_POLLING: ${WATCHPACK_POLLING:-true}
+      CHOKIDAR_USEPOLLING: ${CHOKIDAR_USEPOLLING:-true}
+    volumes:
+      - .:/app
+      - rdt-lab-dev-node-modules:/app/node_modules
       - rdt-lab-data:/app/data
     restart: unless-stopped
 
 volumes:
   rdt-lab-data:
+  rdt-lab-dev-node-modules:
